@@ -20,7 +20,7 @@ HARD RULES:
 4. Reminders: create_reminder with dueAt as ISO 8601 UTC datetime. If the exact date is unclear, ask.
 5. When asked about money, trading, or channels, call check_income/check_expenses/check_trades/check_episodes and report REAL numbers. Never invent figures.
 6. New business or channel to track: add_business. Use exact business names on all records.
-7. When the user says they posted/published an episode, call mark_episode_published (create the record if it predates the hub). When they share TikTok/other platform numbers, call log_channel_stat.
+7. When the user says they posted/published an episode, call mark_episode_published (create the record if it predates the hub). When they share TikTok/other platform numbers, call log_channel_stat. Use add_episode_record to backfill older episodes the hub never tracked.
 8. Be concise, warm, direct. No markdown headers. Match the user's language.
 9. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.`;
 
@@ -154,7 +154,7 @@ const TOOLS = [
       {
         name: "check_episodes",
         description:
-          "Content pipeline: episodes produced vs published, upload lag, waiting list, by channel.",
+          "Content pipeline: episodes produced vs published, upload lag, waiting list, by channel, AND the studio's current series position (which episode we're on, finished flag).",
         parameters: {
           type: "object",
           properties: {
@@ -169,9 +169,15 @@ const TOOLS = [
         parameters: {
           type: "object",
           properties: {
-            series_id: { type: "string", description: "series slug, e.g. farmer-s1" },
+            series_id: {
+              type: "string",
+              description: "series slug, e.g. farmer-s1 — see STUDIO NOW in context",
+            },
             episode_number: { type: "number" },
-            channel_name: { type: "string", description: "only when creating a missing record" },
+            channel_name: {
+              type: "string",
+              description: "only when creating a missing record",
+            },
           },
           required: ["series_id", "episode_number"],
         },
@@ -199,7 +205,10 @@ const TOOLS = [
         parameters: {
           type: "object",
           properties: {
-            platform: { type: "string", description: "tiktok | instagram | other" },
+            platform: {
+              type: "string",
+              description: "tiktok | instagram | other",
+            },
             name: { type: "string", description: "channel handle or name" },
             views: { type: "number" },
             likes: { type: "number" },
@@ -346,10 +355,23 @@ export const handleUpdate = internalAction({
       }
     } catch {}
 
+    let studioLine = "";
+    try {
+      const ov = await ctx.runQuery(internal.studio.contentOverview, {
+        days: 30,
+      });
+      const st = ov.studioState;
+      studioLine = st
+        ? `\nSTUDIO NOW: series "${st.title ?? "?"}" (${st.seriesId}), episode ${st.episodeNumber}${
+            st.maxEpisodes ? ` of ${st.maxEpisodes}` : ""
+          }${st.finished ? ", FINISHED" : ""}`
+        : "";
+    } catch {}
+
     const bizList = businesses.length
       ? businesses.map((b: any) => `${b.name} (${b.kind})`).join(", ")
       : "none yet";
-    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}`;
+    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}${studioLine}`;
 
     const contents: any[] = [
       { role: "user", parts: [{ text: contextNote }] },
@@ -445,7 +467,7 @@ export const handleUpdate = internalAction({
                 days: Number(args.days ?? 30),
               });
             } else if (name === "check_episodes") {
-              result = await ctx.runQuery(internal.insights.episodeStats, {
+              result = await ctx.runQuery(internal.studio.contentOverview, {
                 days: Number(args.days ?? 30),
               });
             } else if (name === "mark_episode_published") {
