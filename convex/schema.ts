@@ -38,4 +38,35 @@ export default defineSchema({
     key: v.string(),
     value: v.any(),
   }),
+
+  trades: defineTable({
+    tradeId: v.string(),
+    symbol: v.string(),
+    side: v.optional(v.string()),
+    strategy: v.optional(v.string()), // core | pressure
+    tier: v.optional(v.string()), // take | risky
+    entry: v.optional(v.number()),
+    sl: v.optional(v.number()),
+    tp: v.optional(v.number()),
+    exit: v.optional(v.number()),
+    realizedR: v.optional(v.number()),
+    mfeR: v.optional(v.number()),
+    maeR: v.optional(v.number()),
+    peakR: v.optional(v.number()),
+    status: v.string(), // open | closed
+    openedAt: v.optional(v.number()),
+    closedAt: v.optional(v.number()),
+    engineVersion: v.optional(v.string()),
+  }).index("by_trade_id", ["tradeId"]),
+
+  episodes: defineTable({
+    seriesId: v.string(),
+    channelName: v.optional(v.string()),
+    episodeNumber: v.number(),
+    title: v.optional(v.string()),
+    hookType: v.optional(v.string()),
+    durationSec: v.optional(v.number()),
+    producedAt: v.number(),
+    publishedAt: v.optional(v.number()),
+  }).index("by_series_episode", ["seriesId", "episodeNumber"]),
 });
