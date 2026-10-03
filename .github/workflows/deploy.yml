@@ -12,6 +12,7 @@ jobs:
         with:
           node-version: 20
       - run: npm install
-      - run: npx convex deploy --prod
+      - name: Deploy to Convex
+        run: npx convex deploy
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
