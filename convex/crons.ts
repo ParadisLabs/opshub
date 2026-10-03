@@ -7,7 +7,7 @@ crons.interval("check reminders", { minutes: 1 }, internal.bot.checkReminders);
 
 crons.weekly(
   "weekly ops digest",
-  { dayOfWeek: "Sunday", hourUTC: 19, minuteUTC: 0 },
+  { dayOfWeek: "sunday", hourUTC: 19, minuteUTC: 0 },
   internal.digest.weeklyDigest
 );
 
