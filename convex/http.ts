@@ -100,4 +100,17 @@ http.route({
   }),
 });
 
+http.route({
+  path: "/digest",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (!expected || req.headers.get("x-ops-hub-token") !== expected) {
+      return new Response("forbidden", { status: 403 });
+    }
+    await ctx.scheduler.runAfter(0, internal.digest.weeklyDigest, {});
+    return new Response("digest scheduled");
+  }),
+});
+
 export default http;
