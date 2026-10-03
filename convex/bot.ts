@@ -2,9 +2,14 @@ import { internalAction } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 
-const MODEL = "gemini-flash-latest";
-const API =
-  "https://generativelanguage.googleapis.com/v1beta/models";
+const API = "https://generativelanguage.googleapis.com/v1beta/models";
+
+// Retry chain: cheap/fast first, stable fallbacks after.
+const MODELS = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-3.1-flash-lite",
+];
 
 const SYSTEM_PROMPT = `You are OpsHub, the personal operator AI for one busy person running several businesses (see CURRENT DATA: restaurant, poultry farm, trading, freelance, faceless content channels).
 
@@ -138,6 +143,8 @@ const TOOLS = [
   },
 ];
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function sendTelegram(token: string, chatId: number, text: string) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
@@ -146,19 +153,31 @@ async function sendTelegram(token: string, chatId: number, text: string) {
   });
 }
 
+// Try each model twice (with backoff) before giving up.
 async function callGemini(apiKey: string, contents: any[]) {
-  const res = await fetch(`${API}/${MODEL}:generateContent?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents,
-      tools: TOOLS,
-      generationConfig: { temperature: 0.4 },
-    }),
-  });
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
-  return res.json();
+  let lastErr = "";
+  for (const model of MODELS) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(`${API}/${model}:generateContent?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            contents,
+            tools: TOOLS,
+            generationConfig: { temperature: 0.4 },
+          }),
+        });
+        if (res.ok) return await res.json();
+        lastErr = `Gemini ${model} → ${res.status}: ${(await res.text()).slice(0, 200)}`;
+      } catch (e: any) {
+        lastErr = `Gemini ${model} → ${String(e?.message ?? e).slice(0, 200)}`;
+      }
+      await sleep(1500 * (attempt + 1)); // 1.5s, then 3s
+    }
+  }
+  throw new Error(`All models busy. Last error: ${lastErr}`);
 }
 
 export const handleUpdate = internalAction({
@@ -218,9 +237,7 @@ export const handleUpdate = internalAction({
 
     // 2) Build context + conversation for the AI
     const businesses = await ctx.runQuery(internal.tools.listBusinesses);
-    const recentEntries = await ctx.runQuery(
-      internal.tools.getRecentEntries
-    );
+    const recentEntries = await ctx.runQuery(internal.tools.getRecentEntries);
     const history = await ctx.runQuery(internal.tools.getChat, { chatId });
 
     const bizList = businesses.length
@@ -232,7 +249,9 @@ export const handleUpdate = internalAction({
       { role: "user", parts: [{ text: contextNote }] },
       {
         role: "model",
-        parts: [{ text: "Understood. I'll use this data and follow the hard rules." }],
+        parts: [
+          { text: "Understood. I'll use this data and follow the hard rules." },
+        ],
       },
       ...history.map((h: any) => ({
         role: h.role === "bot" ? "model" : "user",
@@ -309,9 +328,7 @@ export const handleUpdate = internalAction({
                   : undefined,
               });
             } else if (name === "check_reminders") {
-              result = await ctx.runQuery(
-                internal.tools.listUpcomingReminders
-              );
+              result = await ctx.runQuery(internal.tools.listUpcomingReminders);
             } else if (name === "list_businesses") {
               result = businesses.map((b: any) => ({
                 name: b.name,
@@ -330,9 +347,7 @@ export const handleUpdate = internalAction({
                 functionResponse: {
                   name,
                   response: { result },
-                  ...(call.functionCall.id
-                    ? { id: call.functionCall.id }
-                    : {}),
+                  ...(call.functionCall.id ? { id: call.functionCall.id } : {}),
                 },
               },
             ],
@@ -341,7 +356,10 @@ export const handleUpdate = internalAction({
         if (round === 2) reply = textOut || "Done ✅";
       }
     } catch (e: any) {
-      reply = `⚠️ Brain error: ${String(e?.message ?? e).slice(0, 300)}`;
+      const m = String(e?.message ?? e);
+      reply = m.includes("All models busy")
+        ? "🧠 All AI models are busy right now. Wait a minute and resend — your message wasn't lost."
+        : `⚠️ Brain error: ${m.slice(0, 300)}`;
     }
 
     // 4) Remember the exchange + answer
@@ -364,7 +382,11 @@ export const checkReminders = internalAction({
     const lines = due.map(
       (r: any) => `⏰ ${r.text}${r.repeat ? " (daily)" : ""}`
     );
-    await sendTelegram(token, Number(allowed), `🔔 Due now:\n${lines.join("\n")}`);
+    await sendTelegram(
+      token,
+      Number(allowed),
+      `🔔 Due now:\n${lines.join("\n")}`
+    );
     for (const r of due) {
       await ctx.runMutation(internal.tools.completeReminder, { id: r._id });
     }
