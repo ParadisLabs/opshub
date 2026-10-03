@@ -1,0 +1,12 @@
+name: Run weekly digest
+on:
+  workflow_dispatch:
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger digest
+        run: |
+          curl -s -X POST "${{ secrets.HUB_URL }}/digest" \
+            -H "x-ops-hub-token: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}"
+          echo
