@@ -14,10 +14,18 @@ export const weeklyDigest = internalAction({
 
     const money = await ctx.runQuery(internal.insights.moneySummary, { days: 7 });
     const trades = await ctx.runQuery(internal.insights.tradeStats, { days: 7 });
-    const content = await ctx.runQuery(internal.insights.episodeStats, { days: 7 });
+    const content = await ctx.runQuery(internal.studio.contentOverview, { days: 7 });
+
+    const st = content.studioState;
+    const studioNow = st
+      ? `series "${st.title ?? "?"}" (${st.seriesId}), episode ${st.episodeNumber}${
+          st.maxEpisodes ? ` of ${st.maxEpisodes}` : ""
+        }${st.finished ? ", FINISHED" : ""}`
+      : "unknown";
 
     const stats = `MONEY (7d): income ${money.totalIncome}, expenses ${money.totalExpense}. By business: ${money.byBusiness.join(" | ") || "no records"}. Recent: ${money.recent.join(" ; ") || "none"}.
 TRADING (7d): ${trades.closedCount} closed, ${trades.openCount} open now, WR ${trades.winRate ?? "n/a"}%, total ${trades.totalR}R, avg ${trades.avgR ?? "n/a"}R, best ${trades.best ?? "n/a"}R, worst ${trades.worst ?? "n/a"}R. By symbol: ${trades.bySymbol}. By tier: ${trades.byTier}. By strategy: ${trades.byStrategy}. Recent: ${trades.recent.join(" ; ") || "none"}.
+STUDIO NOW: ${studioNow}.
 CONTENT (7d): produced ${content.produced}, published ${content.published}, waiting to post ${content.unpublishedCount}${content.unpublished.length ? ` (${content.unpublished.map((u) => `${u.label} ${u.hoursWaiting}h`).join(", ")})` : ""}, avg publish lag ${content.avgPublishLagHours ?? "n/a"}h. By channel: ${JSON.stringify(content.byChannel)}.`;
 
     const prompt = `You are OpsHub, writing the WEEKLY OPS DIGEST for one operator running a restaurant, a poultry farm, manual trading, freelance work, and faceless video channels. Below are the REAL computed numbers. Do NOT invent any figures not present. If a section has no data, cover it in one short line.
@@ -28,7 +36,7 @@ Write a Telegram digest, max ~1800 characters, exactly this structure:
 📊 WEEKLY OPS DIGEST
 💰 Money: 2-3 lines, signal not noise
 📈 Trading: 2-3 lines (mention if the sample is too small to judge)
-📺 Content: 2-3 lines, call out anything waiting too long to post
+📺 Content: 2-3 lines, call out anything waiting too long to post, and note the studio's current series position
 ✅ Do next: 3-5 concrete actions tied to the numbers above
 Plain text, emojis ok, no markdown headers, direct and specific.`;
 
