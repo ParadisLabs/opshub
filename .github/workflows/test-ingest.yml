@@ -1,0 +1,66 @@
+name: Test ingest
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send sample events to the hub
+        shell: python
+        env:
+          HUB_URL: ${{ secrets.HUB_URL }}
+          HUB_WEBHOOK_SECRET: ${{ secrets.HUB_WEBHOOK_SECRET }}
+        run: |
+          import hashlib, hmac, json, os, time, urllib.request, uuid
+
+          url = os.environ["HUB_URL"].rstrip("/") + "/ingest"
+          secret = os.environ["HUB_WEBHOOK_SECRET"].encode()
+          now = int(time.time())
+
+          opened = {
+              "schema_version": 1,
+              "event_id": str(uuid.uuid4()),
+              "type": "trade.opened",
+              "source": "engine",
+              "trade_id": "TEST-XAU-001",
+              "symbol": "XAUUSD",
+              "side": "BUY",
+              "tier": "take",
+              "strategy": "core",
+              "entry": 2344.5,
+              "sl": 2340.0,
+              "tp": 2357.0,
+              "occurred_at": now,
+          }
+          fired = dict(opened)
+          fired["event_id"] = str(uuid.uuid4())
+          fired["type"] = "trade.closed"
+          fired.update({"exit": 2348.9, "realized_r": 0.88, "mfe_r": 1.1,
+                        "mae_r": -0.2, "peak_r": 1.1, "occurred_at": now + 600})
+          episode = {
+              "schema_version": 1,
+              "event_id": str(uuid.uuid4()),
+              "type": "content.episode_ready",
+              "source": "studio",
+              "series_id": "farmer_s1",
+              "channel_name": "Faceless Farmer",
+              "episode_number": 3,
+              "title": "The Scar in the Field",
+              "hook_type": "question",
+              "duration_sec": 112,
+              "occurred_at": now,
+          }
+
+          # opened, closed, closed again (same event_id -> should dedupe), episode
+          for ev in [opened, fired, fired, episode]:
+              body = json.dumps(ev).encode()
+              mac = hmac.new(secret, body, hashlib.sha256)
+              req = urllib.request.Request(
+                  url, data=body, method="POST",
+                  headers={
+                      "Content-Type": "application/json",
+                      "x-hub-signature-256": "sha256=" + mac.hexdigest(),
+                  },
+              )
+              with urllib.request.urlopen(req) as resp:
+                  print(ev["type"], "->", resp.status, resp.read().decode())
