@@ -4,6 +4,34 @@ import { internal } from "./_generated/api";
 
 const http = httpRouter();
 
+const NOTIFY_TYPES = new Set([
+  "trade.opened",
+  "trade.closed",
+  "content.episode_ready",
+]);
+
+function summarize(event: any): string {
+  const p = event.payload ?? {};
+  const sym = p.symbol ? ` ${p.symbol}` : "";
+  const side = p.side ? ` ${p.side}` : "";
+  if (event.type === "trade.opened") {
+    const entry = p.entry != null ? ` @ ${p.entry}` : "";
+    return `📈${sym}${side} trade opened${entry} — hub is tracking it`;
+  }
+  if (event.type === "trade.closed") {
+    const r = typeof p.realized_r === "number" ? p.realized_r : null;
+    return `🏁${sym}${side} closed: ${
+      r === null ? "logged" : `${r >= 0 ? "+" : ""}${r}R`
+    }`;
+  }
+  if (event.type === "content.episode_ready") {
+    return `📺 "${p.title ?? "Episode"}" (ep ${p.episode_number ?? "?"})${
+      p.channel_name ? ` — ${p.channel_name}` : ""
+    } is ready to post`;
+  }
+  return `Event received: ${event.type}`;
+}
+
 http.route({
   path: "/telegram",
   method: "POST",
@@ -62,6 +90,12 @@ http.route({
       type: event.type,
       payload: event,
     });
+    if (NOTIFY_TYPES.has(event.type)) {
+      await ctx.scheduler.runAfter(0, internal.broadcast.notifyEvent, {
+        type: event.type as string,
+        summary: summarize(event),
+      });
+    }
     return new Response("ok");
   }),
 });
