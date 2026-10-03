@@ -18,10 +18,11 @@ HARD RULES:
 2. add_entry is ONLY for journal and note entries — never for income/expense.
 3. Store amounts as plain numbers in the user's own currency. Never convert, never assume USD.
 4. Reminders: create_reminder with dueAt as ISO 8601 UTC datetime. If the exact date is unclear, ask.
-5. When asked about money or progress, call check_income/check_expenses/check_reminders and report REAL numbers. Never invent figures.
+5. When asked about money, trading, or channels, call check_income/check_expenses/check_trades/check_episodes and report REAL numbers. Never invent figures.
 6. New business or channel to track: add_business. Use exact business names on all records.
-7. Be concise, warm, direct. No markdown headers. Match the user's language.
-8. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.`;
+7. When the user says they posted/published an episode, call mark_episode_published (create the record if it predates the hub). When they share TikTok/other platform numbers, call log_channel_stat.
+8. Be concise, warm, direct. No markdown headers. Match the user's language.
+9. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.`;
 
 const TOOLS = [
   {
@@ -139,6 +140,75 @@ const TOOLS = [
         description: "List tracked businesses/channels.",
         parameters: { type: "object", properties: {} },
       },
+      {
+        name: "check_trades",
+        description:
+          "Trading performance: win rate, total/avg R, breakdowns by symbol/tier/strategy, open trades.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "default 30" },
+          },
+        },
+      },
+      {
+        name: "check_episodes",
+        description:
+          "Content pipeline: episodes produced vs published, upload lag, waiting list, by channel.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "default 30" },
+          },
+        },
+      },
+      {
+        name: "mark_episode_published",
+        description:
+          "Mark an episode as posted (creates the record if the hub never heard of it). Use when user says they posted an episode.",
+        parameters: {
+          type: "object",
+          properties: {
+            series_id: { type: "string", description: "series slug, e.g. farmer-s1" },
+            episode_number: { type: "number" },
+            channel_name: { type: "string", description: "only when creating a missing record" },
+          },
+          required: ["series_id", "episode_number"],
+        },
+      },
+      {
+        name: "add_episode_record",
+        description:
+          "Backfill an older episode the hub never tracked (e.g. episodes 1-6 from before wiring).",
+        parameters: {
+          type: "object",
+          properties: {
+            series_id: { type: "string" },
+            episode_number: { type: "number" },
+            channel_name: { type: "string" },
+            title: { type: "string" },
+            published: { type: "boolean", description: "true if already posted" },
+          },
+          required: ["series_id", "episode_number"],
+        },
+      },
+      {
+        name: "log_channel_stat",
+        description:
+          "Log manual channel stats (TikTok, Instagram, etc.) — views, likes, followers. Auto-computes deltas vs the previous log.",
+        parameters: {
+          type: "object",
+          properties: {
+            platform: { type: "string", description: "tiktok | instagram | other" },
+            name: { type: "string", description: "channel handle or name" },
+            views: { type: "number" },
+            likes: { type: "number" },
+            followers: { type: "number" },
+            note: { type: "string" },
+          },
+          required: ["platform", "name"],
+        },
+      },
     ],
   },
 ];
@@ -240,10 +310,46 @@ export const handleUpdate = internalAction({
     const recentEntries = await ctx.runQuery(internal.tools.getRecentEntries);
     const history = await ctx.runQuery(internal.tools.getChat, { chatId });
 
+    let ytLine = "";
+    try {
+      const yt = await ctx.runQuery(internal.youtube.snapshotForDigest);
+      if (yt.length) {
+        ytLine =
+          "\nYouTube: " +
+          yt
+            .map(
+              (y: any) =>
+                `@${String(y.handle).replace(/^@/, "")} — ${y.subscribers ?? "?"} subs, ${y.views ?? "?"} views${
+                  y.delta
+                    ? ` (Δ +${y.delta.subs ?? 0} subs, +${y.delta.views ?? 0} views)`
+                    : ""
+                }`
+            )
+            .join(" | ");
+      }
+    } catch {}
+
+    let socialLine = "";
+    try {
+      const soc = await ctx.runQuery(internal.social.listSocialStats);
+      if (soc.length) {
+        socialLine =
+          "\nOther channels: " +
+          soc
+            .map(
+              (s: any) =>
+                `${s.platform} ${s.name} — views ${s.views ?? "?"}, followers ${s.followers ?? "?"}${
+                  s.delta?.views != null ? ` (Δ +${s.delta.views})` : ""
+                }`
+            )
+            .join(" | ");
+      }
+    } catch {}
+
     const bizList = businesses.length
       ? businesses.map((b: any) => `${b.name} (${b.kind})`).join(", ")
       : "none yet";
-    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}`;
+    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}`;
 
     const contents: any[] = [
       { role: "user", parts: [{ text: contextNote }] },
@@ -334,6 +440,42 @@ export const handleUpdate = internalAction({
                 name: b.name,
                 kind: b.kind,
               }));
+            } else if (name === "check_trades") {
+              result = await ctx.runQuery(internal.insights.tradeStats, {
+                days: Number(args.days ?? 30),
+              });
+            } else if (name === "check_episodes") {
+              result = await ctx.runQuery(internal.insights.episodeStats, {
+                days: Number(args.days ?? 30),
+              });
+            } else if (name === "mark_episode_published") {
+              result = await ctx.runMutation(internal.social.markEpisodePosted, {
+                seriesId: String(args.series_id ?? ""),
+                episodeNumber: Number(args.episode_number ?? 0),
+                channelName: args.channel_name
+                  ? String(args.channel_name)
+                  : undefined,
+              });
+            } else if (name === "add_episode_record") {
+              result = await ctx.runMutation(internal.social.addEpisodeRecord, {
+                seriesId: String(args.series_id ?? ""),
+                episodeNumber: Number(args.episode_number ?? 0),
+                channelName: args.channel_name
+                  ? String(args.channel_name)
+                  : undefined,
+                title: args.title ? String(args.title) : undefined,
+                published: args.published === true,
+              });
+            } else if (name === "log_channel_stat") {
+              result = await ctx.runMutation(internal.social.logSocialStat, {
+                platform: String(args.platform ?? "tiktok"),
+                name: String(args.name ?? "channel"),
+                views: typeof args.views === "number" ? args.views : undefined,
+                likes: typeof args.likes === "number" ? args.likes : undefined,
+                followers:
+                  typeof args.followers === "number" ? args.followers : undefined,
+                note: args.note ? String(args.note) : undefined,
+              });
             } else {
               result = { error: `Unknown tool ${name}` };
             }
