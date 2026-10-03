@@ -40,6 +40,27 @@ export const storeEvent = internalMutation({
       receivedAt: Date.now(),
     });
 
+    // ---- series state (where the studio IS right now) ----
+    if (type === "content.series_state") {
+      const key = "studio:state";
+      const all = await ctx.db.query("kv").collect();
+      const doc = all.find((k) => k.key === key);
+      const value = {
+        seriesId: String(payload.series_id ?? "unknown"),
+        channelName: payload.channel_name
+          ? String(payload.channel_name)
+          : undefined,
+        title: payload.title ? String(payload.title) : undefined,
+        episodeNumber: num(payload.episode_number) ?? 0,
+        maxEpisodes: num(payload.max_episodes),
+        finished: payload.finished === true,
+        lastHook: payload.last_hook ? String(payload.last_hook) : undefined,
+        updatedAt: Date.now(),
+      };
+      if (doc) await ctx.db.patch(doc._id, { value });
+      else await ctx.db.insert("kv", { key, value });
+    }
+
     // ---- derive: trade.opened ----
     if (type === "trade.opened") {
       const tradeId = String(payload.trade_id ?? eventId);
