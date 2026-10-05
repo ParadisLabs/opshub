@@ -11,7 +11,7 @@ const MODELS = [
   "gemini-3.1-flash-lite",
 ];
 
-const SYSTEM_PROMPT = `You are OpsHub, the personal operator AI for one busy person running several businesses (see CURRENT DATA: restaurant, poultry farm, trading, freelance, faceless content channels).
+const SYSTEM_PROMPT = `You are OpsHub, the personal operator AI for one busy person running several businesses (see CURRENT DATA: restaurant, poultry farm, trading, freelance, faceless content channels, flip sourcing).
 
 HARD RULES:
 1. Money records (income/expense): ALWAYS call propose_record first and show its card to the user. NEVER save money directly. The user confirms with yes/no (handled outside you).
@@ -21,8 +21,9 @@ HARD RULES:
 5. When asked about money, trading, or channels, call check_income/check_expenses/check_trades/check_episodes and report REAL numbers. Never invent figures.
 6. New business or channel to track: add_business. Use exact business names on all records.
 7. When the user says they posted/published an episode, call mark_episode_published (create the record if it predates the hub). When they share TikTok/other platform numbers, call log_channel_stat. Use add_episode_record to backfill older episodes the hub never tracked.
-8. Be concise, warm, direct. No markdown headers. Match the user's language.
-9. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.`;
+8. Flip sourcing: when the user wants the flip engine to hunt something ("watch used cars under 5000 in Miami"), call create_flip_watch with query, city (US city slug like miami) and max_price. Tell them the watch syncs to the flip engine within ~15 min and pricing/comps live in the flip repo (flip-broker). For flip pipeline questions call list_flip_deals. All spread numbers are ESTIMATES, never promised profit.
+9. Be concise, warm, direct. No markdown headers. Match the user's language.
+10. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.`;
 
 const TOOLS = [
   {
@@ -218,6 +219,38 @@ const TOOLS = [
           required: ["platform", "name"],
         },
       },
+      {
+        name: "create_flip_watch",
+        description:
+          "Create a hunt for the Flip Broker engine (cars, electronics, anything resellable). Syncs to the engine within ~15 min.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "what to search on Marketplace, e.g. 'used cars'",
+            },
+            city: { type: "string", description: "US city slug, e.g. miami" },
+            max_price: { type: "number", description: "max asking price USD" },
+            category: {
+              type: "string",
+              description: "electronics | furniture | instruments | other",
+            },
+          },
+          required: ["query", "city", "max_price"],
+        },
+      },
+      {
+        name: "list_flip_deals",
+        description:
+          "Flip deal pipeline: active deals by status, wins/losses, estimated profit (ESTIMATE only).",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "default 30" },
+          },
+        },
+      },
     ],
   },
 ];
@@ -368,10 +401,25 @@ export const handleUpdate = internalAction({
         : "";
     } catch {}
 
+    let flipLine = "";
+    try {
+      const fw = await ctx.runQuery(internal.flips.listWatches);
+      if (fw.length) {
+        flipLine =
+          "\nFlip watches (synced to flip engine): " +
+          fw
+            .map(
+              (w: any) =>
+                `${w.watchId} — "${w.query}" in ${w.city}, max $${w.maxPrice}`
+            )
+            .join(" | ");
+      }
+    } catch {}
+
     const bizList = businesses.length
       ? businesses.map((b: any) => `${b.name} (${b.kind})`).join(", ")
       : "none yet";
-    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}${studioLine}`;
+    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}${studioLine}${flipLine}`;
 
     const contents: any[] = [
       { role: "user", parts: [{ text: contextNote }] },
@@ -497,6 +545,17 @@ export const handleUpdate = internalAction({
                 followers:
                   typeof args.followers === "number" ? args.followers : undefined,
                 note: args.note ? String(args.note) : undefined,
+              });
+            } else if (name === "create_flip_watch") {
+              result = await ctx.runMutation(internal.flips.createWatch, {
+                query: String(args.query ?? ""),
+                city: String(args.city ?? ""),
+                maxPrice: Number(args.max_price ?? 0),
+                category: args.category ? String(args.category) : undefined,
+              });
+            } else if (name === "list_flip_deals") {
+              result = await ctx.runQuery(internal.flips.dealStats, {
+                days: Number(args.days ?? 30),
               });
             } else {
               result = { error: `Unknown tool ${name}` };
