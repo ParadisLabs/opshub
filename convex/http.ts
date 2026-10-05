@@ -8,6 +8,9 @@ const NOTIFY_TYPES = new Set([
   "trade.opened",
   "trade.closed",
   "content.episode_ready",
+  "flip.deal_found",
+  "flip.status_changed",
+  "flip.deal_closed",
 ]);
 
 function summarize(event: any): string {
@@ -28,6 +31,17 @@ function summarize(event: any): string {
     return `📺 "${p.title ?? "Episode"}" (ep ${p.episode_number ?? "?"})${
       p.channel_name ? ` — ${p.channel_name}` : ""
     } is ready to post`;
+  }
+  if (event.type === "flip.deal_found") {
+    return `🤝 Flip: "${p.title ?? "listing"}" — ask $${p.asking ?? "?"}, est. spread $${p.est_spread ?? "?"}. Card + draft are in your flip bot`;
+  }
+  if (event.type === "flip.status_changed") {
+    return `🤝 Flip "${p.title ?? p.deal_id ?? ""}" → ${(p.status ?? "").toUpperCase()} — follow-ups managed`;
+  }
+  if (event.type === "flip.deal_closed") {
+    return p.status === "won"
+      ? `🏁 Flip WON: "${p.title ?? p.deal_id ?? ""}" at $${p.price ?? "?"} — P&L logged`
+      : `➖ Flip lost: "${p.title ?? p.deal_id ?? ""}" — logged`;
   }
   return `Event received: ${event.type}`;
 }
@@ -97,6 +111,23 @@ http.route({
       });
     }
     return new Response("ok");
+  }),
+});
+
+// Flip Broker engine pulls its hunt list from here (token in query string).
+http.route({
+  path: "/flipwatches",
+  method: "GET",
+  handler: httpAction(async (ctx, req) => {
+    const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+    const token = new URL(req.url).searchParams.get("token") ?? "";
+    if (!expected || token !== expected) {
+      return new Response("forbidden", { status: 403 });
+    }
+    const watches = await ctx.runQuery(internal.flips.serveWatches, {});
+    return new Response(JSON.stringify({ watches }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }),
 });
 
