@@ -28,7 +28,7 @@ export default defineSchema({
 
   events: defineTable({
     eventId: v.string(),
-    source: v.string(), // engine | studio
+    source: v.string(), // engine | studio | flip
     type: v.string(),
     payload: v.any(),
     receivedAt: v.number(),
@@ -69,4 +69,32 @@ export default defineSchema({
     producedAt: v.number(),
     publishedAt: v.optional(v.number()),
   }).index("by_series_episode", ["seriesId", "episodeNumber"]),
+
+  flipWatches: defineTable({
+    watchId: v.string(), // slug, e.g. iphone-miami
+    query: v.string(),
+    city: v.string(),
+    maxPrice: v.number(),
+    category: v.string(), // electronics | furniture | instruments | other
+    active: v.boolean(),
+    source: v.optional(v.string()), // chat | file
+    createdAt: v.number(),
+  }).index("by_watch_id", ["watchId"]),
+
+  flipDeals: defineTable({
+    dealId: v.string(), // marketplace listing id
+    watchId: v.optional(v.string()),
+    title: v.optional(v.string()),
+    asking: v.optional(v.number()),
+    lowComp: v.optional(v.number()),
+    maxOffer: v.optional(v.number()),
+    estList: v.optional(v.number()),
+    estSpread: v.optional(v.number()),
+    url: v.optional(v.string()),
+    city: v.optional(v.string()),
+    status: v.string(), // found | taken | contacted | posted | won | lost
+    wonPrice: v.optional(v.number()),
+    foundAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_deal_id", ["dealId"]),
 });
