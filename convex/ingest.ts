@@ -155,5 +155,78 @@ export const storeEvent = internalMutation({
         });
       }
     }
+
+    // ---- derive: flip.deal_found ----
+    if (type === "flip.deal_found") {
+      const dealId = String(payload.deal_id ?? eventId);
+      const existingDeal = await ctx.db
+        .query("flipDeals")
+        .withIndex("by_deal_id", (q) => q.eq("dealId", dealId))
+        .first();
+      const fields = {
+        watchId: payload.watch_id ? String(payload.watch_id) : undefined,
+        title: payload.title ? String(payload.title) : undefined,
+        asking: num(payload.asking),
+        lowComp: num(payload.low_comp),
+        maxOffer: num(payload.max_offer),
+        estList: num(payload.est_list),
+        estSpread: num(payload.est_spread),
+        url: payload.url ? String(payload.url) : undefined,
+        city: payload.city ? String(payload.city) : undefined,
+      };
+      if (existingDeal) {
+        await ctx.db.patch(existingDeal._id, { ...fields, updatedAt: Date.now() });
+      } else {
+        await ctx.db.insert("flipDeals", {
+          dealId,
+          ...fields,
+          status: "found",
+          foundAt: toMs(payload.occurred_at) ?? Date.now(),
+          updatedAt: Date.now(),
+        });
+      }
+    }
+
+    // ---- derive: flip.status_changed / flip.deal_closed ----
+    if (type === "flip.status_changed" || type === "flip.deal_closed") {
+      const dealId = String(payload.deal_id ?? eventId);
+      const status = String(payload.status ?? "");
+      const existingDeal = await ctx.db
+        .query("flipDeals")
+        .withIndex("by_deal_id", (q) => q.eq("dealId", dealId))
+        .first();
+      if (!existingDeal) {
+        await ctx.db.insert("flipDeals", {
+          dealId,
+          title: payload.title ? String(payload.title) : undefined,
+          watchId: payload.watch_id ? String(payload.watch_id) : undefined,
+          asking: num(payload.asking),
+          status: status || "found",
+          wonPrice: num(payload.price),
+          foundAt: toMs(payload.occurred_at) ?? Date.now(),
+          updatedAt: Date.now(),
+        });
+      } else {
+        const patch: any = {
+          status: status || existingDeal.status,
+          updatedAt: Date.now(),
+        };
+        if (num(payload.price) !== undefined) patch.wonPrice = num(payload.price);
+        await ctx.db.patch(existingDeal._id, patch);
+        // auto follow-up reminders (48h) — engine never re-sends same status,
+        // so no duplicate reminders
+        if (status === "contacted" || status === "posted") {
+          const label = (existingDeal.title ?? "deal").slice(0, 40);
+          await ctx.db.insert("reminders", {
+            text:
+              status === "contacted"
+                ? `Flip follow-up: seller replied? "${label}"`
+                : `Flip follow-up: buyer leads on "${label}"?`,
+            dueAt: Date.now() + 48 * 3600 * 1000,
+            done: false,
+          });
+        }
+      }
+    }
   },
 });
