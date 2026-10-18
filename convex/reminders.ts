@@ -17,6 +17,9 @@ import { readSettings } from "./settings";
 
 const MINUTE = 60_000;
 const DAY = 86_400_000;
+// A claim older than this is assumed to belong to a crashed invocation, so the
+// reminder is recovered instead of being stuck forever.
+const STALE_CLAIM_MS = 10 * MINUTE;
 
 function normalizeRepeat(repeat?: string | null): string | undefined {
   const r = (repeat ?? "").trim().toLowerCase();
@@ -123,7 +126,12 @@ export const dueIds = internalQuery({
       .collect();
     return rows
       .filter((r) => !r.done)
-      .filter((r) => !(r.lastFiredAt != null && r.lastFiredAt >= r.dueAt))
+      .filter(
+        (r) =>
+          r.lastFiredAt == null ||
+          r.lastFiredAt < r.dueAt ||
+          now - r.lastFiredAt > STALE_CLAIM_MS
+      )
       .map((r) => r._id);
   },
 });
@@ -134,7 +142,13 @@ export const claim = internalMutation({
   handler: async (ctx, { id, now }) => {
     const r = await ctx.db.get(id);
     if (!r || r.done) return null;
-    if (r.lastFiredAt != null && r.lastFiredAt >= r.dueAt) return null;
+    if (
+      r.lastFiredAt != null &&
+      r.lastFiredAt >= r.dueAt &&
+      now - r.lastFiredAt <= STALE_CLAIM_MS
+    ) {
+      return null; // a live invocation owns this one
+    }
     await ctx.db.patch(id, { lastFiredAt: now });
     return {
       id: r._id,
