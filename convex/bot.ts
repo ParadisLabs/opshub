@@ -17,13 +17,16 @@ HARD RULES:
 1. Money records (income/expense): ALWAYS call propose_record first and show its card to the user. NEVER save money directly. The user confirms with yes/no (handled outside you).
 2. add_entry is ONLY for journal and note entries — never for income/expense.
 3. Store amounts as plain numbers in the user's own currency. Never convert, never assume USD.
-4. Reminders: create_reminder with dueAt as ISO 8601 UTC datetime. If the exact date is unclear, ask.
+4. Time is LOCAL, never UTC: read the NOW line in CURRENT DATA and pass create_reminder a local dueAt ("YYYY-MM-DDTHH:MM", or just "HH:MM" for the next time that clock reads it). Never convert to UTC yourself. If the exact date is unclear, ask.
 5. When asked about money, trading, or channels, call check_income/check_expenses/check_trades/check_episodes and report REAL numbers. Never invent figures.
 6. New business or channel to track: add_business. Use exact business names on all records.
 7. When the user says they posted/published an episode, call mark_episode_published (create the record if it predates the hub). When they share TikTok/other platform numbers, call log_channel_stat. Use add_episode_record to backfill older episodes the hub never tracked.
 8. Flip sourcing: when the user wants the flip engine to hunt something ("watch used cars under 5000 in Miami"), call create_flip_watch with query, city (US city slug like miami) and max_price. Tell them the watch syncs to the flip engine within ~15 min and pricing/comps live in the flip repo (flip-broker). For flip pipeline questions call list_flip_deals. All spread numbers are ESTIMATES, never promised profit.
 9. Be concise, warm, direct. No markdown headers. Match the user's language.
-10. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.`;
+10. If CURRENT DATA shows no businesses, guide setup first: ask what businesses to add.
+11. Studios (faceless video engines): create_series starts a brand-new arc (new premise, new character, episode 1); run_studio produces the next episode of the current arc; schedule_studio sets a recurring local-time run; list_studios reports where every channel is. A dispatch reaches GitHub Actions in ~30s and the video takes 20-25 min. Say which studio you queued and what kind.
+12. Finished arc or a studio that has been silent for days: offer create_series for that studio instead of waiting for it to fix itself.
+13. set_timezone only when the operator says the NOW line is wrong. Everything else (reminders, schedules, reports) then follows that timezone automatically.`;
 
 const TOOLS = [
   {
@@ -251,6 +254,75 @@ const TOOLS = [
           },
         },
       },
+      {
+        name: "create_series",
+        description:
+          "Start a brand-new arc in a studio: new premise, newly invented character, episode 1. Also use when an arc has finished.",
+        parameters: {
+          type: "object",
+          properties: {
+            studio: { type: "string", description: "turkce | english | history | all" },
+            topic: { type: "string", description: "optional brief/theme for the new arc" },
+            max_episodes: { type: "number", description: "how long the arc should run" },
+          },
+          required: ["studio"],
+        },
+      },
+      {
+        name: "run_studio",
+        description:
+          "Produce the next episode of a studio's current arc right now (repository_dispatch to its GitHub repo).",
+        parameters: {
+          type: "object",
+          properties: {
+            studio: { type: "string", description: "turkce | english | history" },
+            topic: { type: "string", description: "optional brief for this one episode" },
+          },
+          required: ["studio"],
+        },
+      },
+      {
+        name: "list_studios",
+        description:
+          "Where every studio is: current series, episode, finished flag, schedule, last dispatch.",
+        parameters: { type: "object", properties: {} },
+      },
+      {
+        name: "schedule_studio",
+        description:
+          "Set or change a studio's recurring local-time run (e.g. every day 20:00, or mon/wed/fri 19:30). Times are LOCAL.",
+        parameters: {
+          type: "object",
+          properties: {
+            studio: { type: "string", description: "turkce | english | history" },
+            local_time: { type: "string", description: "HH:MM in local time" },
+            days: { type: "string", description: "'daily' or 'mon,wed,fri'" },
+            enabled: { type: "boolean" },
+            topic: { type: "string" },
+            max_episodes: { type: "number" },
+          },
+          required: ["studio", "local_time"],
+        },
+      },
+      {
+        name: "set_timezone",
+        description:
+          "Change the operator timezone (IANA name, e.g. Europe/Istanbul). Reminders, schedules and both daily reports follow it.",
+        parameters: {
+          type: "object",
+          properties: { timezone: { type: "string" } },
+          required: ["timezone"],
+        },
+      },
+      {
+        name: "snooze_reminder",
+        description: "Push the next due reminder back by N minutes.",
+        parameters: {
+          type: "object",
+          properties: { minutes: { type: "number", description: "default 30" } },
+          required: ["minutes"],
+        },
+      },
     ],
   },
 ];
@@ -388,17 +460,53 @@ export const handleUpdate = internalAction({
       }
     } catch {}
 
+    let nowLine = "";
+    try {
+      const s = await ctx.runQuery(internal.settings.get, {});
+      nowLine = `NOW: ${s.nowLocal} · morning report ${s.morningHour}:00 · evening report ${s.eveningHour}:00`;
+    } catch {}
+
     let studioLine = "";
     try {
       const ov = await ctx.runQuery(internal.studio.contentOverview, {
         days: 30,
       });
-      const st = ov.studioState;
-      studioLine = st
-        ? `\nSTUDIO NOW: series "${st.title ?? "?"}" (${st.seriesId}), episode ${st.episodeNumber}${
-            st.maxEpisodes ? ` of ${st.maxEpisodes}` : ""
-          }${st.finished ? ", FINISHED" : ""}`
-        : "";
+      const list = (ov.studios ?? []).filter((s: any) => s?.channelName);
+      if (list.length) {
+        studioLine =
+          "\nSTUDIOS: " +
+          list
+            .map(
+              (s: any) =>
+                `${s.channelName}: "${s.title ?? s.seriesId}" ep ${s.episodeNumber}${
+                  s.maxEpisodes ? `/${s.maxEpisodes}` : ""
+                }${s.finished ? " FINISHED" : ""}`
+            )
+            .join(" | ");
+      } else if (ov.studioState) {
+        const st = ov.studioState;
+        studioLine = `\nSTUDIOS: "${st.title ?? st.seriesId}" ep ${st.episodeNumber}`;
+      }
+    } catch {}
+
+    let reminderLine = "";
+    try {
+      const rem = await ctx.runQuery(internal.reminders.listUpcoming, {
+        horizonDays: 3,
+      });
+      if (rem.length) {
+        reminderLine =
+          "\nReminders: " +
+          rem
+            .slice(0, 8)
+            .map(
+              (r: any) =>
+                `${r.localTime} ${r.text}${r.overdue ? " (OVERDUE)" : ""}${
+                  r.repeat !== "once" ? ` [${r.repeat}]` : ""
+                }`
+            )
+            .join(" | ");
+      }
     } catch {}
 
     let flipLine = "";
@@ -419,7 +527,7 @@ export const handleUpdate = internalAction({
     const bizList = businesses.length
       ? businesses.map((b: any) => `${b.name} (${b.kind})`).join(", ")
       : "none yet";
-    const contextNote = `CURRENT DATA\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}${studioLine}${flipLine}`;
+    const contextNote = `CURRENT DATA\n${nowLine}\nBusinesses: ${bizList}\nRecent entries:\n${recentEntries || "(empty)"}${ytLine}${socialLine}${studioLine}${reminderLine}${flipLine}`;
 
     const contents: any[] = [
       { role: "user", parts: [{ text: contextNote }] },
@@ -484,10 +592,11 @@ export const handleUpdate = internalAction({
                 platform: args.platform ? String(args.platform) : undefined,
               });
             } else if (name === "create_reminder") {
-              result = await ctx.runMutation(internal.tools.createReminder, {
+              result = await ctx.runMutation(internal.reminders.addReminder, {
                 text: String(args.text ?? "reminder"),
                 dueAt: String(args.dueAt ?? ""),
                 repeat: args.repeat ? String(args.repeat) : undefined,
+                channel: "telegram",
               });
             } else if (name === "check_income") {
               result = await ctx.runQuery(internal.tools.checkIncome, {
@@ -504,7 +613,7 @@ export const handleUpdate = internalAction({
                   : undefined,
               });
             } else if (name === "check_reminders") {
-              result = await ctx.runQuery(internal.tools.listUpcomingReminders);
+              result = await ctx.runQuery(internal.reminders.listUpcoming, { horizonDays: 7 });
             } else if (name === "list_businesses") {
               result = businesses.map((b: any) => ({
                 name: b.name,
@@ -557,6 +666,56 @@ export const handleUpdate = internalAction({
               result = await ctx.runQuery(internal.flips.dealStats, {
                 days: Number(args.days ?? 30),
               });
+            } else if (name === "create_series") {
+              const key = String(args.studio ?? "").toLowerCase();
+              result =
+                key === "all"
+                  ? await ctx.runAction(internal.dispatch.createSeriesEverywhere, {
+                      topic: args.topic ? String(args.topic) : undefined,
+                    })
+                  : await ctx.runAction(internal.dispatch.createSeries, {
+                      studioKey: key,
+                      topic: args.topic ? String(args.topic) : undefined,
+                      maxEpisodes:
+                        typeof args.max_episodes === "number" ? args.max_episodes : undefined,
+                    });
+            } else if (name === "run_studio") {
+              result = await ctx.runAction(internal.dispatch.runStudio, {
+                studioKey: String(args.studio ?? "").toLowerCase(),
+                topic: args.topic ? String(args.topic) : undefined,
+                reason: "telegram request",
+              });
+            } else if (name === "list_studios") {
+              result = await ctx.runQuery(internal.dispatch.listStudios, {});
+            } else if (name === "schedule_studio") {
+              const daysRaw = args.days ? String(args.days).toLowerCase() : "";
+              const dow: Record<string, number> = {
+                sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+              };
+              const wanted =
+                daysRaw && daysRaw !== "daily" && daysRaw !== "every day"
+                  ? daysRaw
+                      .split(/[,\s]+/)
+                      .map((d) => dow[d.slice(0, 3)])
+                      .filter((n) => n !== undefined)
+                  : [];
+              result = await ctx.runMutation(internal.dispatch.setSchedule, {
+                studioKey: String(args.studio ?? "").toLowerCase(),
+                localTime: String(args.local_time ?? ""),
+                days: wanted.length ? wanted : undefined,
+                enabled: typeof args.enabled === "boolean" ? args.enabled : true,
+                topic: args.topic ? String(args.topic) : undefined,
+                maxEpisodes:
+                  typeof args.max_episodes === "number" ? args.max_episodes : undefined,
+              });
+            } else if (name === "set_timezone") {
+              result = await ctx.runMutation(internal.settings.setTimezone, {
+                timezone: String(args.timezone ?? ""),
+              });
+            } else if (name === "snooze_reminder") {
+              result = await ctx.runMutation(internal.reminders.snooze, {
+                minutes: Number(args.minutes ?? 30),
+              });
             } else {
               result = { error: `Unknown tool ${name}` };
             }
@@ -592,26 +751,5 @@ export const handleUpdate = internalAction({
       botText: reply,
     });
     await sendTelegram(token, chatId, reply);
-  },
-});
-
-export const checkReminders = internalAction({
-  handler: async (ctx) => {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const allowed = process.env.ALLOWED_TELEGRAM_ID;
-    if (!token || !allowed) return;
-    const due = await ctx.runQuery(internal.tools.dueReminders);
-    if (due.length === 0) return;
-    const lines = due.map(
-      (r: any) => `⏰ ${r.text}${r.repeat ? " (daily)" : ""}`
-    );
-    await sendTelegram(
-      token,
-      Number(allowed),
-      `🔔 Due now:\n${lines.join("\n")}`
-    );
-    for (const r of due) {
-      await ctx.runMutation(internal.tools.completeReminder, { id: r._id });
-    }
   },
 });

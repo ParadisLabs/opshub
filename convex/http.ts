@@ -131,6 +131,26 @@ http.route({
   }),
 });
 
+// Manual trigger for either daily report, so a workflow (or curl) can test it
+// without waiting for the local hour.
+http.route({
+  path: "/report",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (!expected || req.headers.get("x-ops-hub-token") !== expected) {
+      return new Response("forbidden", { status: 403 });
+    }
+    const kind = new URL(req.url).searchParams.get("kind") === "evening" ? "evening" : "morning";
+    if (kind === "evening") {
+      await ctx.scheduler.runAfter(0, internal.report.sendEvening, {});
+    } else {
+      await ctx.scheduler.runAfter(0, internal.report.sendMorning, {});
+    }
+    return new Response(`report ${kind} scheduled`);
+  }),
+});
+
 http.route({
   path: "/digest",
   method: "POST",

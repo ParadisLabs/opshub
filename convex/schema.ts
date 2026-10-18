@@ -22,9 +22,41 @@ export default defineSchema({
   reminders: defineTable({
     text: v.string(),
     dueAt: v.number(),
-    repeat: v.optional(v.string()),
+    repeat: v.optional(v.string()), // daily | weekdays | weekly | monthly | (absent = once)
     done: v.boolean(),
+    // Local-time bookkeeping: a repeating reminder re-anchors to localTime, so
+    // a late delivery can never shift the whole series.
+    tz: v.optional(v.string()),
+    localTime: v.optional(v.string()), // "20:00"
+    lastFiredAt: v.optional(v.number()),
+    firedCount: v.optional(v.number()),
+    channel: v.optional(v.string()),
+    sourceRef: v.optional(v.string()),
   }).index("by_due", ["dueAt"]),
+
+  studioSchedules: defineTable({
+    studioKey: v.string(),
+    localTime: v.string(), // "20:00" in tz
+    days: v.optional(v.array(v.number())), // 0=Sun..6=Sat, absent/empty = daily
+    enabled: v.boolean(),
+    tz: v.optional(v.string()),
+    topic: v.optional(v.string()),
+    maxEpisodes: v.optional(v.number()),
+    lastRunAt: v.optional(v.number()),
+    lastRunKey: v.optional(v.string()),
+  }).index("by_studio", ["studioKey"]),
+
+  dispatches: defineTable({
+    studioKey: v.string(),
+    repo: v.string(),
+    kind: v.string(), // run | create_series | schedule
+    topic: v.optional(v.string()),
+    newSeries: v.boolean(),
+    ok: v.boolean(),
+    status: v.optional(v.number()),
+    detail: v.optional(v.string()),
+    at: v.number(),
+  }).index("by_at", ["at"]),
 
   events: defineTable({
     eventId: v.string(),

@@ -40,25 +40,49 @@ export const storeEvent = internalMutation({
       receivedAt: Date.now(),
     });
 
-    // ---- series state (where the studio IS right now) ----
-    if (type === "content.series_state") {
-      const key = "studio:state";
+    // ---- series state (where each studio IS right now) ----
+    // One key per channel. The old single "studio:state" doc meant three
+    // studios overwrote each other, so "which series/episode" was whatever
+    // posted last — this is the fix for that oscillation.
+    if (type === "content.series_state" || type === "content.episode_ready") {
+      const channel = String(
+        payload.channel_name ?? payload.series_id ?? "unknown"
+      );
+      const key = `studio:state:${channel}`;
       const all = await ctx.db.query("kv").collect();
       const doc = all.find((k) => k.key === key);
+      const previous: any = doc?.value ?? {};
+      const incomingEp = num(payload.episode_number) ?? 0;
       const value = {
-        seriesId: String(payload.series_id ?? "unknown"),
-        channelName: payload.channel_name
-          ? String(payload.channel_name)
-          : undefined,
-        title: payload.title ? String(payload.title) : undefined,
-        episodeNumber: num(payload.episode_number) ?? 0,
-        maxEpisodes: num(payload.max_episodes),
-        finished: payload.finished === true,
-        lastHook: payload.last_hook ? String(payload.last_hook) : undefined,
+        seriesId: String(payload.series_id ?? previous.seriesId ?? "unknown"),
+        channelName: channel,
+        title: payload.title
+          ? String(payload.title)
+          : previous.title,
+        episodeNumber:
+          type === "content.series_state"
+            ? incomingEp
+            : Math.max(incomingEp, previous.episodeNumber ?? 0),
+        maxEpisodes: num(payload.max_episodes) ?? previous.maxEpisodes,
+        finished:
+          type === "content.series_state"
+            ? payload.finished === true
+            : previous.finished ?? false,
+        lastHook: payload.last_hook
+          ? String(payload.last_hook)
+          : previous.lastHook,
+        language: payload.language
+          ? String(payload.language)
+          : previous.language,
         updatedAt: Date.now(),
       };
       if (doc) await ctx.db.patch(doc._id, { value });
       else await ctx.db.insert("kv", { key, value });
+
+      // keep the legacy key pointing at the most recent studio, for old code
+      const legacy = all.find((k) => k.key === "studio:state");
+      if (legacy) await ctx.db.patch(legacy._id, { value });
+      else await ctx.db.insert("kv", { key: "studio:state", value });
     }
 
     // ---- derive: trade.opened ----

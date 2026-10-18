@@ -187,68 +187,6 @@ export const clearPending = internalMutation({
   },
 });
 
-// ---------- reminders ----------
-
-export const createReminder = internalMutation({
-  args: { text: v.string(), dueAt: v.string(), repeat: v.optional(v.string()) },
-  handler: async (ctx, { text, dueAt, repeat }) => {
-    const ts = Date.parse(dueAt);
-    const safe = Number.isFinite(ts) ? ts : Date.now() + 3_600_000;
-    await ctx.db.insert("reminders", {
-      text,
-      dueAt: safe,
-      repeat,
-      done: false,
-    });
-    return { created: true, dueAtIso: new Date(safe).toISOString() };
-  },
-});
-
-export const listUpcomingReminders = internalQuery({
-  handler: async (ctx) => {
-    const now = Date.now();
-    const week = now + 7 * DAY;
-    const rows = await ctx.db
-      .query("reminders")
-      .withIndex("by_due", (q) => q.gte("dueAt", now))
-      .collect();
-    return rows
-      .filter((r) => !r.done && r.dueAt <= week)
-      .sort((a, b) => a.dueAt - b.dueAt)
-      .slice(0, 10)
-      .map((r) => ({
-        text: r.text,
-        dueAt: new Date(r.dueAt).toISOString(),
-        repeat: r.repeat,
-      }));
-  },
-});
-
-export const dueReminders = internalQuery({
-  handler: async (ctx) => {
-    const now = Date.now();
-    const rows = await ctx.db
-      .query("reminders")
-      .withIndex("by_due", (q) => q.lte("dueAt", now))
-      .collect();
-    return rows.filter((r) => !r.done);
-  },
-});
-
-export const completeReminder = internalMutation({
-  args: { id: v.id("reminders") },
-  handler: async (ctx, { id }) => {
-    const r = await ctx.db.get(id);
-    if (!r) return { ok: false };
-    if (r.repeat === "daily") {
-      await ctx.db.patch(id, { dueAt: r.dueAt + DAY });
-    } else {
-      await ctx.db.patch(id, { done: true });
-    }
-    return { ok: true };
-  },
-});
-
 // ---------- money queries ----------
 
 export const checkIncome = internalQuery({

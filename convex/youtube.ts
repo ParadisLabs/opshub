@@ -1,5 +1,6 @@
 import { internalAction, internalQuery, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 
 export const saveSnapshot = internalMutation({
   args: { handle: v.string(), stats: v.any() },
