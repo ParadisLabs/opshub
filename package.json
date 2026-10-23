@@ -1,0 +1,7 @@
+{
+  "name": "opshub",
+  "private": true,
+  "dependencies": {
+    "convex": "^1.19.0"
+  }
+}
