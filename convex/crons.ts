@@ -3,17 +3,19 @@ import { internal } from "./_generated/api";
 
 const crons = cronJobs();
 
-// Reminders: the engine claims before sending and only advances on a confirmed
-// delivery, so this stays cheap even though it runs every minute.
-crons.interval("check reminders", { minutes: 1 }, internal.reminders.fireDue);
+// Reminders moved to the OpsHub worker (D1-backed /remind + GitHub /sweep).
+// Keep this OFF: after the HUB_URL migration Convex no longer receives bot
+// commands, so a Convex reminder would fire with no way to list or delete it —
+// exactly the "it didn't know what I meant" bug.
+// crons.interval("check reminders", { minutes: 1 }, internal.reminders.fireDue);
 
 // Studio schedules: fires when the local clock hits a studio's configured time.
 // A 5-minute cadence against a 15-minute window gives at most one run per day.
 crons.interval("studio schedules", { minutes: 5 }, internal.dispatch.runDueSchedules);
 
-// Morning brief + evening report. Gated by the operator's local hour, with a
-// two-hour catch-up window, so this can run often without double-sending.
-crons.interval("daily reports", { minutes: 30 }, internal.report.tick);
+// Morning/evening report moved to the worker (/report-tick, Istanbul windows,
+// live GitHub + D1 data). Convex's copy reads tables that stopped updating.
+// crons.interval("daily reports", { minutes: 30 }, internal.report.tick);
 
 crons.weekly(
   "weekly ops digest",
