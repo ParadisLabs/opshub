@@ -17,6 +17,10 @@ crons.interval("studio schedules", { minutes: 5 }, internal.dispatch.runDueSched
 // live GitHub + D1 data). Convex's copy reads tables that stopped updating.
 // crons.interval("daily reports", { minutes: 30 }, internal.report.tick);
 
+// Worker sweep + report tick: fires reminders, pre-news alerts and the
+// morning/evening report windows (all timed in the user's local timezone).
+crons.interval("hub sweep + report", { minutes: 5 }, internal.report.sweepPing);
+
 crons.weekly(
   "weekly ops digest",
   { dayOfWeek: "sunday", hourUTC: 16, minuteUTC: 0 }, // 19:00 in Istanbul
