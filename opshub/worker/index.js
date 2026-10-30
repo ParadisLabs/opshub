@@ -1205,7 +1205,8 @@ async function failureWatch(ctx, opts) {
       continue;
     }
     for (const run of runs) {
-      if (!["failure", "timed_out", "cancelled"].includes(run.conclusion || "")) continue;
+      // cancelled/superseded runs are not real failures — only report true failures
+      if (!["failure", "timed_out"].includes(run.conclusion || "")) continue;
       if (Date.parse(run.created_at) < cutoff) continue;
       const key = `fail:${name}:${run.id}`;
       try {
@@ -1649,7 +1650,14 @@ async function handleCommand(text, chatId, ctx, settings) {
     return "Registered repos:\n" + REPOS.map((r) => `• ${r.name} (${r.event})`).join("\n");
   }
   if (text === "/status") {
-    return `Hub status: OK\nVersion: ${VERSION}\nMode: Telegram-first\nLocation: ${settings.place} (${settings.tz})\nLocal time: ${localParts(new Date(), settings.tz).hhmm}\nReminders: D1-backed (swept every 5m by Convex cron)\nNews alerts: 45m before High impact`;
+    const statuses = (await repoStatuses(ctx)) || [];
+    const lines = [`Hub status: OK`, `Version: ${VERSION}`, `Mode: Telegram-first`, `Location: ${settings.place} (${settings.tz})`, `Local time: ${localParts(new Date(), settings.tz).hhmm}`, `Reminders: D1-backed (swept every 5m by Convex cron)`, `News alerts: 45m before High impact`, ``, `Services (last run per repo):`];
+    for (const s of statuses) {
+      const icon = iconFor(s.result, s.state);
+      const when = s.at ? ago(s.at) : "";
+      lines.push(`${icon} ${s.repo} — ${s.result}${when ? ` (${when})` : ""}${s.state === "in_progress" || s.state === "queued" ? ` (${s.state})` : ""}`);
+    }
+    return lines.join("\n");
   }
   if (text === "/health") {
     try { return await healthText(ctx, settings); }
@@ -1668,6 +1676,35 @@ async function handleCommand(text, chatId, ctx, settings) {
       }).join("\n");
     } catch (e) {
       return "Could not read the job ledger: " + String(e).slice(0, 120);
+    }
+  }
+  if (text === "/close") {
+    if (!db) return "No database — can't close trades here.";
+    try {
+      await ensureTables(db);
+      const chat = String(chatId);
+      const data = "C|close";
+      const existing = await db
+        .prepare("SELECT id FROM tgacks WHERE target = 'icc' AND data = ? AND chat_id = ? ORDER BY id DESC LIMIT 1")
+        .bind(data, chat)
+        .first();
+      if (existing) {
+        return "Close already queued for this chat — the engine applies it on its next scan. Use /status for service health.";
+      }
+      await db
+        .prepare("INSERT INTO tgacks(target,data,chat_id,message_id,created_at) VALUES(?,?,?,?,?)")
+        .bind("icc", data, chat, "cmd-close-" + Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000))
+        .run();
+      await recordJob(db, {
+        job_id: `ack:close:${chat}:${Math.floor(Date.now() / 1000)}`,
+        service: "icc-engine",
+        kind: "telegram_command",
+        status: "C|close",
+        detail: `typed /close by chat ${chat} → relayed to /acks for the next engine scan`,
+      });
+      return "✅ Close queued — icc-engine applies C|close on its next scan (closes the most recent open trade).";
+    } catch (e) {
+      return "Could not queue close: " + String(e).slice(0, 120);
     }
   }
   if (text === "/report" || text === "/daily") {
