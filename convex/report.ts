@@ -353,3 +353,27 @@ export const tick = internalAction({
     return { localHour: hour, timezone: settings.timezone, sent: actions };
   },
 });
+
+/**
+ * Pings the OpsHub worker every few minutes so reminder sweeps, pre-news
+ * alerts and the morning/evening report windows keep firing. The GitHub
+ * sweep workflow could not be created (repo token lacks the workflow
+ * scope), so Convex crons are the scheduler; the worker owns the data.
+ * The URL is the public worker endpoint, not a secret.
+ */
+const OPS_HUB_URL = "https://site-383ef7b599e542209e6a7c00f9ab7638.freebuff.page";
+
+export const sweepPing = internalAction({
+  handler: async () => {
+    const out: Record<string, number> = {};
+    for (const path of ["/sweep", "/report-tick"]) {
+      try {
+        const r = await fetch(OPS_HUB_URL + path, { method: "POST" });
+        out[path] = r.status;
+      } catch (e) {
+        out[path] = 0;
+      }
+    }
+    return out;
+  },
+});
