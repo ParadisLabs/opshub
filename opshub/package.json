@@ -1,0 +1,14 @@
+{
+  "name": "opshub",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test/hub.test.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "dotenv": "^16.3.1"
+  }
+}

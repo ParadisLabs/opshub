@@ -1,0 +1,20 @@
+# dependencies / build output
+node_modules/
+dist/
+.wrangler/
+.venvs/
+__pycache__/
+*.pyc
+
+# local secrets and credentials — never commit
+*.key
+.groq_key
+.dev.vars
+.env
+.env.*
+
+# logs
+*.log
+
+# third-party clone kept locally only
+OpenTerminal/

@@ -1,0 +1,30 @@
+name: OpsHub Sweep
+
+# Fires due reminders on OpsHub every 10 minutes.
+# The hub itself is a Worker; this cron exists because GitHub Actions
+# is the scheduler the whole fleet already trusts.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: fire due reminders
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /tmp/out -w "%{http_code}" -X POST "$HUB_URL/sweep")
+          echo "Hub sweep response: $code"
+          if [ "$code" != "200" ]; then
+            cat /tmp/out
+            exit 1
+          fi
+          echo "Sweep completed successfully"

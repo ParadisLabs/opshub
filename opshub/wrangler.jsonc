@@ -1,0 +1,14 @@
+{
+  "name": "opshub",
+  "compatibility_date": "2026-10-01",
+  "main": "worker/index.js",
+  "vars": {
+    "GITHUB_OWNER": "landryparadis012-git"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": ""
+    }
+  ]
+}
