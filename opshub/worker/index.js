@@ -2263,6 +2263,32 @@ app.get("/tg-webhook-info", async (ctx) => {
 });
 
 // JSON health snapshot for scripts/dashboards (Telegram /health is the same data).
+// Register this worker's Telegram webhook (the worker calls Telegram
+// directly with its own TELEGRAM_BOT_TOKEN so Telegram can resolve the
+// webhook URL from the same network the worker is reachable on).
+app.post("/set-webhook", async (ctx) => {
+  const tok = (ctx.env.TELEGRAM_BOT_TOKEN || "").trim();
+  if (!tok) return ctx.json({ error: "no bot token configured" }, 500);
+  const secret = (ctx.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+  const url = (ctx.env.HUB_URL || "").trim().replace(/\/?$/, "") + "/telegram";
+  if (!url) return ctx.json({ error: "no HUB_URL configured" }, 500);
+  try {
+    const r = await fetch("https://api.telegram.org/bot" + tok + "/setWebhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "OpsHub" },
+      body: JSON.stringify({
+        url,
+        ...(secret ? { secret_token: secret } : {}),
+        allowed_updates: ["message", "callback_query"],
+      }),
+    });
+    const j = await r.json();
+    return ctx.json({ ok: j && j.ok, result: j && j.result });
+  } catch (e) {
+    return ctx.json({ ok: false, error: String(e).slice(0, 200) }, 502);
+  }
+});
+
 app.get("/health", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
   try {
