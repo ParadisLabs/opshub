@@ -29,6 +29,7 @@ import { Hono } from "hono";
 
 const app = new Hono();
 const VERSION = "3.3.0";
+const HTTP_UNAVAILABLE = { error: "hub misconfigured" };
 const REPOS = [
   { name: "faceless-studio", event: "opshub.produce" },
   { name: "faceless-turkce-studio", event: "opshub.produce" },
@@ -268,7 +269,7 @@ function fmtDayClock(epoch, tz) {
 
 // ---------------- HMAC (events from studios / icc-engine) ----------------
 async function verifySignature(rawBody, header, secret) {
-  if (!secret) return true;
+  if (!secret) return false;
   if (!header) return false;
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -2047,8 +2048,13 @@ app.all("/telegram", telegramHandler);
 app.post("/acks", async (ctx) => {
   try {
     const raw = await ctx.req.text();
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
+    if (!secret) {
+      if (ctx.env.DB) await ensureTables(ctx.env.DB);
+      return ctx.json(HTTP_UNAVAILABLE, 503);
+    }
     const ok = await verifySignature(
-      raw, ctx.req.header("x-hub-signature-256") || "", ctx.env.HUB_WEBHOOK_SECRET
+      raw, ctx.req.header("x-hub-signature-256") || "", secret
     );
     if (!ok) return ctx.json({ error: "invalid signature" }, 401);
     if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
@@ -2116,8 +2122,7 @@ app.post("/sweep", async (ctx) => {
     let alerts = 0;
     try { alerts = await newsAlerts(ctx); } catch (e) { /* alerts best-effort */ }
     let post = 0;
-    try { post = await newsPost(ctx); } catch (e) { /* post-release best-effort */ }
-    let fails = { found: 0, sent: 0 };
+    try { post = await newsPost(ctx); } catch (e) { /* post-release best-effort */ }    let fails = { found: 0, sent: 0 };
     try { fails = await failureWatch(ctx); } catch (e) { console.error("failureWatch:", e); }
 
     // Self-heal icc-engine: GitHub's scheduled cron misses slots (it went
@@ -2126,7 +2131,9 @@ app.post("/sweep", async (ctx) => {
     let icc = "skipped";
     try {
       const token = ctx.env.HUB_GITHUB_TOKEN;
+
       if (token) {
+
         const j = await ghGet("/repos/landryparadis012-git/icc-engine/actions/runs?per_page=3", token);
         const runs = j.workflow_runs || [];
         const active = runs.some((r) => r.status === "queued" || r.status === "in_progress");
@@ -2162,79 +2169,91 @@ app.post("/ingest", async (ctx) => {
     try { body = JSON.parse(raw); } catch (_) { return ctx.json({ error: "bad json" }, 400); }
     const token = ctx.env.HUB_GITHUB_TOKEN;
 
-    if (body && body.type && !body.repo) {
-      const sigOk = await verifySignature(
-        raw, ctx.req.header("x-hub-signature-256") || "", ctx.env.HUB_WEBHOOK_SECRET
-      );
-      if (!sigOk) return ctx.json({ error: "invalid signature" }, 401);
-      if (!ctx.env.DB) return ctx.json({ status: "ok", event: body.type, stored: false }, 200);
-      await ensureTables(ctx.env.DB);
-      const r = await storeEvent(ctx.env.DB, body);
-      await recordJob(ctx.env.DB, {
-        job_id: body.event_id || `${body.type}:${body.repo || "hub"}`,
-        service: body.repo || "hub",
-        kind: body.type,
-        status: r.stored ? "recorded" : "duplicate",
-        detail: JSON.stringify(body).slice(0, 500),
-      });
-      return ctx.json({ status: "ok", event: body.type, ...r }, 200);
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
+    if (!secret) {
+      if (ctx.env.DB) await ensureTables(ctx.env.DB);
+      return ctx.json(HTTP_UNAVAILABLE, 503);
     }
-
-    if (!token || !body.repo) {
-      return ctx.json({ error: "missing token or repo" }, 400);
-    }
-
-    const seriesName = body.client_payload?.series_name || "";
-    const episode = body.client_payload?.episode || "";
-    const dedupKey = body.repo + ":" + seriesName + ":" + episode;
-
-    if (ctx.env.DB) {
-      try {
-        await ensureTables(ctx.env.DB);
-        const existing = await ctx.env.DB
-          .prepare("SELECT id FROM dispatched WHERE dedup_key = ?")
-          .bind(dedupKey).first();
-
-        if (existing) {
-          return ctx.json({
-            status: "duplicate",
-            message: "Episode already dispatched: " + dedupKey,
-          }, 200);
-        }
-
-        await ctx.env.DB
-          .prepare(
-            "INSERT INTO dispatched (dedup_key, repo, series, episode, dispatched_at) VALUES (?, ?, ?, ?, ?)"
-          )
-          .bind(dedupKey, body.repo, seriesName, episode, new Date().toISOString()).run();
-      } catch (e) {
-        console.error("D1 dedup error:", e);
-      }
-    }
-
-    const success = await dispatchGitHub(token, body.repo, "opshub.produce", body.client_payload);
-    if (ctx.env.DB) {
-      await recordJob(ctx.env.DB, {
-        job_id: `dispatch:${dedupKey}`,
-        service: body.repo,
-        kind: "repository_dispatch",
-        status: success ? "dispatched" : "dispatch_failed",
-        detail: `topic=${seriesName || "-"} episode=${episode || "-"}`,
-        created_at: Math.floor(Date.parse(body.client_payload?.dispatched_at || "") / 1000) || nowSec(),
-      });
-    }
-    return ctx.json({ status: success ? "accepted" : "dispatch_failed", dedup_key: dedupKey }, 200);
+    const sigOk = await verifySignature(
+      raw, ctx.req.header("x-hub-signature-256") || "", secret
+    );
+    if (!sigOk) return ctx.json({ error: "invalid signature" }, 401);
+    if (!ctx.env.DB) return ctx.json({ status: "ok", event: body.type, stored: false }, 200);
+    await ensureTables(ctx.env.DB);
+    const r = await storeEvent(ctx.env.DB, body);
+    await recordJob(ctx.env.DB, {
+      job_id: body.event_id || `${body.type}:${body.repo || "hub"}`,
+      service: body.repo || "hub",
+      kind: body.type,
+      status: r.stored ? "recorded" : "duplicate",
+      detail: JSON.stringify(body).slice(0, 500),
+    });
+    return ctx.json({ status: "ok", event: body.type, ...r }, 200);
   } catch (e) {
     console.error("Ingest error:", e);
     return ctx.json({ error: "internal error" }, 500);
   }
+  if (!token || !body.repo) {
+    return ctx.json({ error: "missing token or repo" }, 400);
+  }
+
+  const seriesName = body.client_payload?.series_name || "";
+  const episode = body.client_payload?.episode || "";
+  const dedupKey = body.repo + ":" + seriesName + ":" + episode;
+
+  if (ctx.env.DB) {
+    try {
+      await ensureTables(ctx.env.DB);
+      const existing = await ctx.env.DB
+        .prepare("SELECT id FROM dispatched WHERE dedup_key = ?")
+        .bind(dedupKey).first();
+
+      if (existing) {
+        return ctx.json({
+          status: "duplicate",
+          message: "Episode already dispatched: " + dedupKey,
+        }, 200);
+      }
+
+      await ctx.env.DB
+        .prepare(
+          "INSERT INTO dispatched (dedup_key, repo, series, episode, dispatched_at) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind(dedupKey, body.repo, seriesName, episode, new Date().toISOString()).run();
+    } catch (e) {
+      console.error("D1 dedup error:", e);
+    }
+  }
+
+  const success = await dispatchGitHub(token, body.repo, "opshub.produce", body.client_payload);
+  if (ctx.env.DB) {
+    await recordJob(ctx.env.DB, {
+      job_id: `dispatch:${dedupKey}`,
+      service: body.repo,
+      kind: "repository_dispatch",
+      status: success ? "dispatched" : "dispatch_failed",
+      detail: `topic=${seriesName || "-"} episode=${episode || "-"}`,
+      created_at: Math.floor(Date.parse(body.client_payload?.dispatched_at || "") / 1000) || nowSec(),
+    });
+  }
+  return ctx.json({ status: success ? "accepted" : "dispatch_failed", dedup_key: dedupKey }, 200);
 });
 
 // ---------------- legacy emit ----------------
 app.post("/emit", async (ctx) => {
   try {
-    const body = await ctx.req.json();
+    const raw = await ctx.req.text();
+    let body;
+    try { body = JSON.parse(raw); } catch (_) { return ctx.json({ error: "bad json" }, 400); }
+
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
     if (body && body.type && !body.repo) {
+      if (!secret) {
+        if (ctx.env.DB) await ensureTables(ctx.env.DB);
+        return ctx.json(HTTP_UNAVAILABLE, 503);
+      }
+      const sigOk = await verifySignature(raw, ctx.req.header("x-hub-signature-256") || "", secret);
+      if (!sigOk) return ctx.json({ error: "invalid signature" }, 401);
       if (ctx.env.DB) {
         await ensureTables(ctx.env.DB);
         const r = await storeEvent(ctx.env.DB, body);
@@ -2242,6 +2261,7 @@ app.post("/emit", async (ctx) => {
       }
       return ctx.json({ status: "accepted", stored: false }, 200);
     }
+
     const token = ctx.env.HUB_GITHUB_TOKEN;
     if (token && body.repo) {
       await dispatchGitHub(token, body.repo, "legacy.produce", body.client_payload);
@@ -2388,6 +2408,20 @@ app.post("/report-tick", async (ctx) => {
   }
 });
 
+app.post("/reminders", async (ctx) => {
+  if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
+  try {
+    await ensureTables(ctx.env.DB);
+    const body = await ctx.req.json();
+    const chatId = body.chat_id || body.chatId;
+    if (!chatId) return ctx.json({ error: "chat_id required" }, 400);
+    const rows = await listReminders(ctx.env.DB, chatId);
+    return ctx.json({ reminders: rows });
+  } catch (e) {
+    return ctx.json({ error: String(e).slice(0, 200) }, 500);
+  }
+});
+
 // First-set is open (registers the report owner); changing needs the secret.
 app.post("/set-owner", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
@@ -2398,7 +2432,10 @@ app.post("/set-owner", async (ctx) => {
     const cur = await kvGet(ctx.env.DB, "report_owner");
     const curChat = cur ? JSON.parse(cur).chat : null;
     const secret = ctx.env.HUB_WEBHOOK_SECRET;
-    const authed = !curChat || (secret && body.secret === secret) || String(body.chat_id) === String(curChat);
+    if (!secret) {
+      return ctx.json(HTTP_UNAVAILABLE, 503);
+    }
+    const authed = !curChat || body.secret === secret || String(body.chat_id) === String(curChat);
     if (!authed) return ctx.json({ error: "owner already set — pass secret to change" }, 403);
     await kvSet(ctx.env.DB, "report_owner", { chat: String(body.chat_id), setAt: Date.now() });
     return ctx.json({ status: "ok", owner: String(body.chat_id) });
@@ -2410,13 +2447,17 @@ app.post("/set-owner", async (ctx) => {
 // HTTP read endpoints expose reminder texts — require the webhook secret.
 function isAdmin(ctx) {
   const secret = ctx.env.HUB_WEBHOOK_SECRET;
-  if (!secret) return true;
+  if (!secret) {
+    return false;
+  }
   return ctx.req.query("secret") === secret;
 }
 
 app.get("/reminders", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
-  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 403);
+  if (!isAdmin(ctx)) {
+    return ctx.json({ error: "hub misconfigured" }, 503);
+  }
   try {
     await ensureTables(ctx.env.DB);
     const chatId = ctx.req.query("chat_id") || "0";
@@ -2428,7 +2469,11 @@ app.get("/reminders", async (ctx) => {
 
 app.get("/settings", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
-  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 403);
+  const ok = isAdmin(ctx);
+  if (ok === false) {
+    return ctx.json({ error: "hub misconfigured" }, 503);
+  }
+  if (ok !== true) return ctx.json({ error: "bad secret" }, 403);
   const s = await getSettings(ctx.env.DB);
   const p = localParts(new Date(), s.tz);
   return ctx.json({ settings: s, local_time: p.hhmm });
