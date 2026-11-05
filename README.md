@@ -62,9 +62,7 @@ instant is what gets stored. `convex/time.ts` does the conversion:
   operator's local day, not UTC midnight
 - DST is handled by a two-pass offset calculation (tested against Berlin)
 
-Change it with `/tz Europe/Nicosia` in Telegram, or `OPS_TIMEZONE` on
-the deployment. Existing saved timezone settings take precedence over the code
-default; run `/tz Europe/Nicosia` once if the saved setting is still `Europe/Istanbul`.
+Change the worker's local timezone with `/tz Europe/Nicosia` in Telegram. Convex-scheduled reports use the `Europe/Nicosia` code default; if a previous `ops:timezone` value is already stored in Convex KV, that stored value takes precedence and must be updated in Convex. `OPS_TIMEZONE` is only the fallback when no stored value exists.
 
 ## Reminders
 
