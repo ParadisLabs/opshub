@@ -93,6 +93,22 @@ window so a deployment that was asleep at 07:00 still sends at 08:30.
 Change the hours with `OPS_MORNING_HOUR` / `OPS_EVENING_HOUR`, or force one with
 `POST /report?kind=morning|evening` plus the `x-ops-hub-token` header.
 
+## Publishing integrations (not enabled yet)
+
+- **YouTube Analytics API** requires channel-owner OAuth and the
+  `yt-analytics.readonly` scope. The current YouTube job uses a public Data API
+  key for channel/video counters; it is not Analytics reporting.
+- **YouTube uploads** require OAuth with `youtube.upload`. New uploads should
+  be explicitly private for human review before any public release.
+- **TikTok Content Posting API** requires app approval and user authorization.
+  Direct posting needs `video.publish`; unaudited clients are restricted to
+  private visibility. `video.upload` can stage drafts for the user to finish
+  in TikTok.
+
+These are deliberately not enabled by this maintenance PR: no OAuth client
+secrets or app approvals were supplied, and no automated public publishing is
+being turned on.
+
 ## Endpoints
 
 | route | auth | purpose |
