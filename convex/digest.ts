@@ -28,7 +28,7 @@ TRADING (7d): ${trades.closedCount} closed, ${trades.openCount} open now, WR ${t
 STUDIO NOW: ${studioNow}.
 CONTENT (7d): produced ${content.produced}, published ${content.published}, waiting to post ${content.unpublishedCount}${content.unpublished.length ? ` (${content.unpublished.map((u) => `${u.label} ${u.hoursWaiting}h`).join(", ")})` : ""}, avg publish lag ${content.avgPublishLagHours ?? "n/a"}h. By channel: ${JSON.stringify(content.byChannel)}.`;
 
-    const prompt = `You are OpsHub, writing the WEEKLY OPS DIGEST for one operator running a restaurant, a poultry farm, manual trading, freelance work, and faceless video channels. Below are the REAL computed numbers. Do NOT invent any figures not present. If a section has no data, cover it in one short line.
+    const prompt = `You are OpsHub, writing a WEEKLY OPS DIGEST for an operator managing a small technology and digital-business portfolio: software/automation projects, faceless video studios, a deal-sourcing workflow, and a trading system. Do not assume the operator runs a restaurant, poultry farm, or any business not represented in the data below. These are the REAL computed numbers. Do NOT invent figures, activities, causes, or project status not present. If a section has no data, cover it in one short line.
 
 ${stats}
 
