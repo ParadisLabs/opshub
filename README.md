@@ -52,7 +52,7 @@ list studios
 
 ## Time
 
-Every user-facing time is local (`Europe/Istanbul` by default), and the raw UTC
+Every user-facing time is local (`Europe/Nicosia` by default), and the raw UTC
 instant is what gets stored. `convex/time.ts` does the conversion:
 
 - naive input (`2026-10-18T20:00`) is read as **local** wall clock
@@ -62,8 +62,10 @@ instant is what gets stored. `convex/time.ts` does the conversion:
   operator's local day, not UTC midnight
 - DST is handled by a two-pass offset calculation (tested against Berlin)
 
-Change it with `set_timezone Europe/Istanbul` in Telegram, or `OPS_TIMEZONE` on
-the deployment.
+Change it with `set_timezone Europe/Nicosia` in Telegram, or `OPS_TIMEZONE` on
+the deployment. Existing saved timezone settings take precedence over this code
+default; run the Telegram command once after deployment if the saved setting is
+still `Europe/Istanbul`.
 
 ## Reminders
 
@@ -114,7 +116,7 @@ Change the hours with `OPS_MORNING_HOUR` / `OPS_EVENING_HOUR`, or force one with
 | `HUB_WEBHOOK_SECRET` | yes | verifies studio/engine events |
 | `GOOGLE_API_KEY` | for AI replies + digest | Gemini |
 | **`OPSHUB_GITHUB_TOKEN`** | **for dispatch** | fine-grained PAT, `Contents: write` on the three studio repos |
-| `OPS_TIMEZONE` | no | default `Europe/Istanbul` |
+| `OPS_TIMEZONE` | no | default `Europe/Nicosia` |
 | `OPS_MORNING_HOUR` / `OPS_EVENING_HOUR` | no | default `7` / `21` local |
 
 Set them on the deployment (`npx convex env set NAME value`), not in GitHub
@@ -123,6 +125,7 @@ Secrets — the Actions secret `CONVEX_DEPLOY_KEY` is only for deploying.
 ## Deploy
 
 Push to `main` runs `.github/workflows/deploy.yml` (`npx convex deploy`).
-Cron jobs are declared in `convex/crons.ts`: reminders every minute, studio
-schedules every 5 minutes, reports every 30 minutes, weekly digest Sunday 19:00
-Istanbul, YouTube stats daily.
+Cron jobs are declared in `convex/crons.ts`: studio schedules every 5 minutes,
+weekly digest Sunday at 17:00 UTC (19:00 Nicosia in winter / 20:00 in summer),
+and YouTube stats daily. Reminders and morning/evening reports are handled by
+the OpsHub worker, not these Convex crons.
