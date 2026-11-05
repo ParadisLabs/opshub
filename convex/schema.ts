@@ -71,6 +71,15 @@ export default defineSchema({
     value: v.any(),
   }),
 
+  // Shared daily image-call reservations across the three studio repositories.
+  aiUsageDaily: defineTable({
+    day: v.string(), // UTC YYYY-MM-DD
+    calls: v.number(),
+    studioCounts: v.any(),
+    requestIds: v.array(v.string()),
+    updatedAt: v.number(),
+  }).index("by_day", ["day"]),
+
   trades: defineTable({
     tradeId: v.string(),
     symbol: v.string(),
