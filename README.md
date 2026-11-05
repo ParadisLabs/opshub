@@ -62,10 +62,9 @@ instant is what gets stored. `convex/time.ts` does the conversion:
   operator's local day, not UTC midnight
 - DST is handled by a two-pass offset calculation (tested against Berlin)
 
-Change it with `set_timezone Europe/Nicosia` in Telegram, or `OPS_TIMEZONE` on
-the deployment. Existing saved timezone settings take precedence over this code
-default; run the Telegram command once after deployment if the saved setting is
-still `Europe/Istanbul`.
+Change it with `/tz Europe/Nicosia` in Telegram, or `OPS_TIMEZONE` on
+the deployment. Existing saved timezone settings take precedence over the code
+default; run `/tz Europe/Nicosia` once if the saved setting is still `Europe/Istanbul`.
 
 ## Reminders
 
