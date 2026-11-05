@@ -3081,8 +3081,8 @@ News alerts: 45m before High impact`;
   }
   if (/^\/tz\b/.test(text)) {
     const z = text.replace(/^\/tz\s*/, "").trim();
-    if (!z) return `Current timezone: ${settings.tz}. Set with /tz Europe/Istanbul`;
-    if (!tzValid(z)) return `"${z}" isn't a valid timezone. Example: /tz Europe/Istanbul`;
+    if (!z) return `Current timezone: ${settings.tz}. Set with /tz Europe/Nicosia`;
+    if (!tzValid(z)) return `"${z}" isn't a valid timezone. Example: /tz Europe/Nicosia`;
     await saveSettings(db, { tz: z });
     const p = localParts(/* @__PURE__ */ new Date(), z);
     return `\u2705 Timezone: ${z} \u2014 local time now ${p.hhmm} (${p.weekday} ${p.date}).`;
