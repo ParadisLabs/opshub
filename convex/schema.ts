@@ -138,4 +138,11 @@ export default defineSchema({
     foundAt: v.number(),
     updatedAt: v.number(),
   }).index("by_deal_id", ["dealId"]),
+  aiUsageDaily: defineTable({
+    day: v.string(),
+    calls: v.number(),
+    studioCounts: v.any(),
+    requestIds: v.array(v.string()),
+    updatedAt: v.number(),
+  }).index("by_day", ["day"]),
 });
