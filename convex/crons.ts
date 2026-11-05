@@ -13,7 +13,7 @@ const crons = cronJobs();
 // A 5-minute cadence against a 15-minute window gives at most one run per day.
 crons.interval("studio schedules", { minutes: 5 }, internal.dispatch.runDueSchedules);
 
-// Morning/evening report moved to the worker (/report-tick, Istanbul windows,
+// Morning/evening report moved to the worker (/report-tick, local-time windows,
 // live GitHub + D1 data). Convex's copy reads tables that stopped updating.
 // crons.interval("daily reports", { minutes: 30 }, internal.report.tick);
 
@@ -23,7 +23,7 @@ crons.interval("hub sweep + report", { minutes: 5 }, internal.report.sweepPing);
 
 crons.weekly(
   "weekly ops digest",
-  { dayOfWeek: "sunday", hourUTC: 16, minuteUTC: 0 }, // 19:00 in Istanbul
+  { dayOfWeek: "sunday", hourUTC: 17, minuteUTC: 0 }, // 19:00 Nicosia in winter; 20:00 in summer (fixed UTC cron)
   internal.digest.weeklyDigest
 );
 
