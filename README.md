@@ -126,3 +126,15 @@ Push to `main` runs `.github/workflows/deploy.yml` (`npx convex deploy`).
 Cron jobs are declared in `convex/crons.ts`: reminders every minute, studio
 schedules every 5 minutes, reports every 30 minutes, weekly digest Sunday 19:00
 Istanbul, YouTube stats daily.
+
+
+## OpsHub web command centre
+
+A read-only dashboard is available in `dashboard/` and configured as a Render static site in `render.yaml`.
+
+Deployment:
+1. Deploy this repository's Render blueprint; it publishes `dashboard/` as a static site.
+2. In the Convex deployment used by OpsHub, set `OPS_DASHBOARD_TOKEN` to a long random secret.
+3. Open the dashboard and enter the Convex HTTP Actions URL ending in `/dashboard/snapshot` plus that token. The token stays in tab memory and is not persisted in browser storage.
+
+The GET-only endpoint is token-protected, read-only and no-cache. The dashboard summarizes ICC trades, Deal Bridge leads, studio schedules/output, OpsHub dispatch health, reminders and activity. Empty sections mean no matching records have been ingested, not that an external service is healthy. No trade, deal, publishing or scheduling actions are exposed.
