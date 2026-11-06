@@ -1,7 +1,7 @@
 /**
  * Operator settings that used to be hardcoded: timezone and the two report
  * hours. Everything falls back to sane defaults, so the hub works with no
- * configuration at all — it just starts in Istanbul time.
+ * configuration at all — it starts in the configured default timezone (Europe/Nicosia).
  */
 import { internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
@@ -60,7 +60,7 @@ export const setTimezone = internalMutation({
   args: { timezone: v.string() },
   handler: async (ctx, { timezone }) => {
     if (!T.isValidTz(timezone)) {
-      return { ok: false, error: `Unknown timezone "${timezone}". Use an IANA name like Europe/Istanbul.` };
+      return { ok: false, error: `Unknown timezone "${timezone}". Use an IANA name like Europe/Nicosia.` };
     }
     await kvSet(ctx, "ops:timezone", timezone);
     const now = Date.now();

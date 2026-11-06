@@ -52,7 +52,7 @@ list studios
 
 ## Time
 
-Every user-facing time is local (`Europe/Istanbul` by default), and the raw UTC
+Every user-facing time is local (`Europe/Nicosia` by default), and the raw UTC
 instant is what gets stored. `convex/time.ts` does the conversion:
 
 - naive input (`2026-10-18T20:00`) is read as **local** wall clock
@@ -62,8 +62,7 @@ instant is what gets stored. `convex/time.ts` does the conversion:
   operator's local day, not UTC midnight
 - DST is handled by a two-pass offset calculation (tested against Berlin)
 
-Change it with `set_timezone Europe/Istanbul` in Telegram, or `OPS_TIMEZONE` on
-the deployment.
+Change the worker's local timezone with `/tz Europe/Nicosia` in Telegram. Convex-scheduled reports use the `Europe/Nicosia` code default; if a previous `ops:timezone` value is already stored in Convex KV, that stored value takes precedence and must be updated in Convex. `OPS_TIMEZONE` is only the fallback when no stored value exists.
 
 ## Reminders
 
@@ -94,6 +93,22 @@ window so a deployment that was asleep at 07:00 still sends at 08:30.
 Change the hours with `OPS_MORNING_HOUR` / `OPS_EVENING_HOUR`, or force one with
 `POST /report?kind=morning|evening` plus the `x-ops-hub-token` header.
 
+## Publishing integrations (not enabled yet)
+
+- **YouTube Analytics API** requires channel-owner OAuth and the
+  `yt-analytics.readonly` scope. The current YouTube job uses a public Data API
+  key for channel/video counters; it is not Analytics reporting.
+- **YouTube uploads** require OAuth with `youtube.upload`. New uploads should
+  be explicitly private for human review before any public release.
+- **TikTok Content Posting API** requires app approval and user authorization.
+  Direct posting needs `video.publish`; unaudited clients are restricted to
+  private visibility. `video.upload` can stage drafts for the user to finish
+  in TikTok.
+
+These are deliberately not enabled by this maintenance PR: no OAuth client
+secrets or app approvals were supplied, and no automated public publishing is
+being turned on.
+
 ## Endpoints
 
 | route | auth | purpose |
@@ -114,7 +129,7 @@ Change the hours with `OPS_MORNING_HOUR` / `OPS_EVENING_HOUR`, or force one with
 | `HUB_WEBHOOK_SECRET` | yes | verifies studio/engine events |
 | `GOOGLE_API_KEY` | for AI replies + digest | Gemini |
 | **`OPSHUB_GITHUB_TOKEN`** | **for dispatch** | fine-grained PAT, `Contents: write` on the three studio repos |
-| `OPS_TIMEZONE` | no | default `Europe/Istanbul` |
+| `OPS_TIMEZONE` | no | default `Europe/Nicosia` |
 | `OPS_MORNING_HOUR` / `OPS_EVENING_HOUR` | no | default `7` / `21` local |
 
 Set them on the deployment (`npx convex env set NAME value`), not in GitHub
@@ -123,6 +138,7 @@ Secrets — the Actions secret `CONVEX_DEPLOY_KEY` is only for deploying.
 ## Deploy
 
 Push to `main` runs `.github/workflows/deploy.yml` (`npx convex deploy`).
-Cron jobs are declared in `convex/crons.ts`: reminders every minute, studio
-schedules every 5 minutes, reports every 30 minutes, weekly digest Sunday 19:00
-Istanbul, YouTube stats daily.
+Cron jobs are declared in `convex/crons.ts`: studio schedules every 5 minutes,
+weekly digest Sunday at 17:00 UTC (19:00 Nicosia in winter / 20:00 in summer),
+and YouTube stats daily. Reminders and morning/evening reports are handled by
+the OpsHub worker, not these Convex crons.

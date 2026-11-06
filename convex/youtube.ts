@@ -32,6 +32,15 @@ export const snapshotForDigest = internalQuery({
   },
 });
 
+async function fetchYouTubeJson(url: string, label: string) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 240);
+    throw new Error(`${label} HTTP ${response.status}: ${detail}`);
+  }
+  return response.json();
+}
+
 export const pullChannelStats = internalAction({
   handler: async (ctx) => {
     const key = process.env.YOUTUBE_API_KEY;
@@ -46,7 +55,7 @@ export const pullChannelStats = internalAction({
     for (const handle of handles) {
       try {
         const chUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics,contentDetails&forHandle=${encodeURIComponent(handle)}&key=${key}`;
-        const ch = await (await fetch(chUrl)).json();
+        const ch = await fetchYouTubeJson(chUrl, "channel lookup");
         const item = ch?.items?.[0];
         if (!item) {
           console.log(`youtube: ${handle} not found`);
@@ -61,23 +70,28 @@ export const pullChannelStats = internalAction({
         };
         try {
           const up = item.contentDetails?.relatedPlaylists?.uploads;
-          const pl = await (
-            await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&maxResults=5&playlistId=${up}&key=${key}`)
-          ).json();
+          if (!up) throw new Error("uploads playlist ID missing from channel response");
+          const pl = await fetchYouTubeJson(
+            `https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&maxResults=5&playlistId=${up}&key=${key}`,
+            "uploads playlist"
+          );
           const ids = (pl.items ?? [])
             .map((i: any) => i.contentDetails?.videoId)
             .filter(Boolean);
           if (ids.length) {
-            const vs = await (
-              await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${ids.join(",")}&key=${key}`)
-            ).json();
+            const vs = await fetchYouTubeJson(
+              `https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${ids.join(",")}&key=${key}`,
+              "recent video statistics"
+            );
             stats.recentVideos = (vs.items ?? []).map((v: any) => ({
               title: v.snippet?.title ?? "",
               views: Number(v.statistics?.viewCount ?? 0),
               likes: Number(v.statistics?.likeCount ?? 0),
             }));
           }
-        } catch {}
+        } catch (e: any) {
+          console.log(`youtube: recent videos for ${handle} unavailable: ${e?.message ?? e}`);
+        }
         await ctx.runMutation(internal.youtube.saveSnapshot, { handle, stats });
         console.log(`youtube: ${handle} → subs ${stats.subscribers}, views ${stats.views}, videos ${stats.videos}`);
       } catch (e: any) {
