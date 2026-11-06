@@ -167,6 +167,17 @@ http.route({
 
 http.route({
   path: "/dashboard/snapshot",
+  method: "OPTIONS",
+  handler: httpAction(async () => new Response(null, { status: 204, headers: {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "authorization",
+    "access-control-max-age": "600",
+  }})),
+});
+
+http.route({
+  path: "/dashboard/snapshot",
   method: "GET",
   handler: httpAction(async (ctx, req) => {
     const expected = process.env.OPS_DASHBOARD_TOKEN;
@@ -181,6 +192,7 @@ http.route({
         "content-type": "application/json; charset=utf-8",
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
+        "access-control-allow-origin": "*",
       },
     });
   }),
