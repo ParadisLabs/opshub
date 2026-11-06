@@ -1,0 +1,26 @@
+name: OpsHub worker checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: opshub/package-lock.json
+      - name: Install OpsHub dependencies
+        run: npm ci --prefix opshub
+      - name: Run existing OpsHub tests
+        run: npm test --prefix opshub
+      - name: Check Cloudflare Worker syntax
+        run: node --check opshub/worker/index.js
