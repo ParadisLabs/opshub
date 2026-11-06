@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: opshub-command-centre
+    runtime: static
+    buildCommand: ""
+    staticPublishPath: ./dashboard
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
