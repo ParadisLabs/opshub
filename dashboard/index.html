@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>OpsHub · Command Centre</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#e8edf5;background:#0b1020}*{box-sizing:border-box}body{margin:0;padding:28px;max-width:1440px;margin-inline:auto}header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}h1{margin:0;font-size:28px}p,.muted{color:#9aa8bd}.panel{background:#141d31;border:1px solid #293650;border-radius:14px;padding:18px;margin-top:18px}.connect{display:flex;gap:8px;flex-wrap:wrap}input{background:#0b1020;border:1px solid #3a4964;color:white;border-radius:8px;padding:11px;min-width:230px}button{background:#8ab4ff;color:#081326;border:0;border-radius:8px;padding:11px 16px;font-weight:700;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:18px}.metric{background:#141d31;border:1px solid #293650;border-radius:12px;padding:16px}.metric small{color:#9aa8bd}.metric strong{display:block;font-size:27px;margin-top:7px}.columns{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}.panel h2{font-size:17px;margin:0 0 12px}.item{padding:11px 0;border-top:1px solid #293650;display:flex;justify-content:space-between;gap:12px}.item:first-of-type{border-top:0}.status{color:#8fdaae}.bad{color:#ff9e9e}a{color:#9fc4ff}.hidden{display:none}#status{margin-top:10px}.tiny{font-size:12px;color:#8291a8}
+</style></head><body>
+<header><div><h1>OpsHub Command Centre</h1><p>Read-only overview · trading, Deal Bridge, studios and operations</p></div><div class="tiny" id="updated">Not connected</div></header>
+<section class="panel"><h2>Secure connection</h2><p class="muted">Enter your OpsHub dashboard endpoint and token. The token stays in this tab's memory and is never saved to browser storage.</p><div class="connect"><input id="endpoint" placeholder="https://YOUR-CONVEX-SITE.convex.site/dashboard/snapshot" type="url"><input id="token" placeholder="Dashboard token" type="password" autocomplete="off"><button id="connect">Connect</button></div><div id="status" class="tiny">No data loaded.</div></section>
+<div id="dashboard" class="hidden">
+<div class="grid" id="metrics"></div><div class="columns">
+<section class="panel"><h2>ICC trading · last 30 days</h2><div id="trades"></div></section>
+<section class="panel"><h2>Deal Bridge</h2><div id="deals"></div></section>
+<section class="panel"><h2>Studios</h2><div id="studios"></div></section>
+<section class="panel"><h2>Operations · last 24 hours</h2><div id="ops"></div></section>
+<section class="panel"><h2>Upcoming reminders</h2><div id="reminders"></div></section>
+<section class="panel"><h2>Personal activity · last 30 days</h2><div id="activity"></div></section>
+</div></div>
+<script>
+const $=id=>document.getElementById(id);const money=n=>n==null?"—":new Intl.NumberFormat(undefined,{maximumFractionDigits:2}).format(n);const date=n=>n?new Date(n).toLocaleString():"—";
+function metric(label,value){return '<div class="metric"><small>'+label+'</small><strong>'+value+'</strong></div>'}
+function item(left,right,href){return '<div class="item"><span>'+left+'</span><span>'+right+'</span></div>'}
+function safe(s){return String(s??"—").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function render(d){$("dashboard").classList.remove("hidden");$("updated").textContent="Updated "+date(d.generatedAt);
+$("metrics").innerHTML=[metric("Open ICC positions",d.trading.open),metric("ICC net result · 30d",money(d.trading.netR30d)+"R"),metric("ICC win rate · 30d",d.trading.winRatePct==null?"No closed trades":d.trading.winRatePct+"%"),metric("Active deal leads",d.flip.activeDeals),metric("Episodes produced · 30d",d.studios.produced30d),metric("Dispatch failures · 24h",d.operations.dispatchFailures24h)].join("");
+$("trades").innerHTML='<p class="muted">'+d.trading.closed30d+' closed trades · '+(d.trading.winRatePct==null?"win rate unavailable":d.trading.winRatePct+"% wins")+'</p>'+d.trading.recent.map(t=>item(safe(t.symbol)+" "+safe(t.side)+" · "+safe(t.status),t.realizedR==null?"—":money(t.realizedR)+"R")).join("")||'<p class="muted">No trade records.</p>';
+$("deals").innerHTML='<p class="muted">'+d.flip.activeWatches+' active watches · '+d.flip.found30d+' leads found · 30d</p>'+d.flip.recent.map(x=>item(x.url?'<a href="'+safe(x.url)+'" target="_blank" rel="noopener">'+safe(x.title)+'</a>':safe(x.title),safe(x.status)+" · $"+money(x.asking))).join("")||'<p class="muted">No deal records.</p>';
+$("studios").innerHTML='<p class="muted">'+d.studios.produced30d+' produced · '+d.studios.published30d+' published · 30d</p>'+d.studios.schedules.map(s=>item(safe(s.studioKey),s.enabled?"Enabled · "+safe(s.localTime):"Paused")).join("")||'<p class="muted">No schedules configured.</p>';
+$("ops").innerHTML='<p class="muted">'+d.operations.dispatches24h+' dispatches · '+d.operations.events24h+' events · 24h</p>'+d.operations.recentDispatches.map(x=>item(safe(x.repo||x.studioKey)+" · "+safe(x.kind),x.ok?'<span class="status">OK</span>':'<span class="bad">Failed</span>')).join("")||'<p class="muted">No recent dispatches.</p>';
+$("reminders").innerHTML=d.reminders.map(x=>item(safe(x.text),date(x.dueAt))).join("")||'<p class="muted">No open reminders.</p>';
+$("activity").innerHTML='<p>Entries: <b>'+d.activity.entries30d+'</b></p><p>Income: <b>'+money(d.activity.income30d)+'</b></p><p>Expenses: <b>'+money(d.activity.expense30d)+'</b></p>';
+}
+$("connect").onclick=async()=>{const url=$("endpoint").value.trim(),token=$("token").value.trim();$("status").textContent="Connecting…";try{const r=await fetch(url,{headers:{Authorization:"Bearer "+token}});if(!r.ok)throw Error("HTTP "+r.status+" — check endpoint, token and Convex deployment");render(await r.json());$("status").textContent="Connected. Read-only access confirmed.";}catch(e){$("status").textContent="Connection failed: "+e.message;}};
+</script></body></html>
