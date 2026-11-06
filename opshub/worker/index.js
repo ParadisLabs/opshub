@@ -80,11 +80,20 @@ app.get("/", async (ctx) => {
 // ---------------- helpers ----------------
 async function sendTelegram(botToken, chatId, text) {
   try {
-    await fetch("https://api.telegram.org/bot" + botToken + "/sendMessage", {
+    const resp = await fetch("https://api.telegram.org/bot" + botToken + "/sendMessage", {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": "OpsHub" },
       body: JSON.stringify({ chat_id: chatId, text: String(text).slice(0, 4000) }),
     });
+    if (!resp.ok) {
+      console.error("Telegram send rejected:", resp.status);
+      return false;
+    }
+    const result = await resp.json().catch(() => null);
+    if (!result || result.ok !== true) {
+      console.error("Telegram send returned non-ok response:", JSON.stringify(result).slice(0, 300));
+      return false;
+    }
     return true;
   } catch (e) {
     console.error("Failed to send Telegram reply:", e);
@@ -577,33 +586,64 @@ async function newsAlerts(ctx) {
     if (e.impact !== "High") continue;
     const delta = e.ts - now;
     if (delta <= 0 || delta > 45 * 60) continue;
-    const key = "ffalert:" + e.ts + ":" + e.title.slice(0, 40);
+
+    const base = e.ts + ":" + e.title.slice(0, 40);
+    const alertKey = "ffalert:" + base;
+    const guardKey = "fficcguard:" + base;
+    const cur = CURRENCIES[e.country] || e.country;
+
+    // Telegram alert and ICC guard dispatch are independent. If either side
+    // fails, its own key remains unset and the next 5m sweep retries it.
     try {
-      const seen = await kvGet(db, key);
-      if (seen) continue;
-      const mins = Math.round(delta / 60);
-      const cur = CURRENCIES[e.country] || e.country;
-      const bits = [];
-      if (e.forecast) bits.push(`Forecast ${e.forecast}`);
-      if (e.previous) bits.push(`Prev ${e.previous}`);
-      const text =
-        `🚨 HIGH IMPACT in ${mins}m (${fmtClock(e.ts, settings.tz)} ${settings.place})\n` +
-        `${cur} — ${e.title}\n` +
-        (bits.length ? bits.join(" · ") + "\n" : "") +
-        `Avoid new entries until after the release. I'll send the actual, the direction and pairs to watch right after it lands.`;
-      const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
-      const ownerRow = await kvGet(db, "report_owner");
-      const owner = ownerRow ? JSON.parse(ownerRow).chat : null;
-      if (botToken && owner) {
-        await sendTelegram(botToken, owner, text);
-        await kvSet(db, key, now);
-        sent++;
+      if (!(await kvGet(db, alertKey))) {
+        const mins = Math.round(delta / 60);
+        const bits = [];
+        if (e.forecast) bits.push(`Forecast ${e.forecast}`);
+        if (e.previous) bits.push(`Prev ${e.previous}`);
+        const text =
+          `🚨 HIGH IMPACT in ${mins}m (${fmtClock(e.ts, settings.tz)} ${settings.place})\n` +
+          `${cur} — ${e.title}\n` +
+          (bits.length ? bits.join(" · ") + "\n" : "") +
+          `Avoid new entries until after the release. ICC will enforce a temporary entry blackout and resume after the release buffer.`;
+        const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+        const ownerRow = await kvGet(db, "report_owner");
+        const owner = ownerRow ? JSON.parse(ownerRow).chat : null;
+        if (botToken && owner) {
+          const delivered = await sendTelegram(botToken, owner, text);
+          if (delivered) {
+            await kvSet(db, alertKey, now);
+            sent++;
+          } else {
+            console.error("Pre-news Telegram alert not delivered; will retry:", e.title);
+          }
+        }
       }
-    } catch (e2) { /* per-event failures are fine */ }
+
+      if (!(await kvGet(db, guardKey))) {
+        const token = ctx.env.HUB_GITHUB_TOKEN;
+        if (!token) {
+          console.error("Pre-news ICC guard dispatch skipped: HUB_GITHUB_TOKEN unavailable");
+        } else {
+          const ok = await dispatchGitHub(token, "icc-engine", "icc.news_guard", {
+            reason: "pre-news guard",
+            currency: cur,
+            event: e.title,
+            event_ts: e.ts,
+          });
+          if (ok) {
+            await kvSet(db, guardKey, now);
+          } else {
+            console.error("Pre-news ICC guard dispatch failed; will retry next sweep:", e.title);
+          }
+        }
+      }
+    } catch (e2) {
+      console.error("Pre-news event processing failed; will retry next sweep:", e.title, e2);
+    }
   }
   try {
     await db
-      .prepare("DELETE FROM kv WHERE k LIKE 'ffalert:%' AND CAST(v AS INTEGER) < ?")
+      .prepare("DELETE FROM kv WHERE (k LIKE 'ffalert:%' OR k LIKE 'fficcguard:%') AND CAST(v AS INTEGER) < ?")
       .bind(now - 43200)
       .run();
   } catch (e) { /* pruning best-effort */ }
@@ -648,7 +688,8 @@ async function newsPost(ctx) {
   let due = events.filter(inWindow);
   if (!due.length) return 0;
 
-  // Actuals appear in the calendar only after the release — refetch once.
+  // Actuals can arrive after the calendar's cached copy. Force-refresh while
+  // an in-window event still has no actual, then retry on the next 5m sweep.
   if (due.some((e) => !e.actual)) {
     events = await getFF(ctx, true).catch(() => events);
     due = events.filter(inWindow);
@@ -661,9 +702,10 @@ async function newsPost(ctx) {
 
   let sent = 0;
   for (const e of due) {
-    const key = "ffpost:" + e.ts + ":" + e.title.slice(0, 40);
+    const base = e.ts + ":" + e.title.slice(0, 40);
+    const postKey = "ffpost:" + base;
+    const dispatchKey = "fficcdispatch:" + base;
     try {
-      if (await kvGet(db, key)) continue;
       if (!e.actual) continue; // still no actual — retry next sweep
 
       const cur = CURRENCIES[e.country] || e.country;
@@ -672,13 +714,13 @@ async function newsPost(ctx) {
       const f = parseNum(e.forecast);
       const p = parseNum(e.previous);
 
+      // A raw numeric beat/miss is not universally bullish or bearish:
+      // higher inflation, unemployment and jobless claims have different
+      // policy implications. Never infer direction from sign alone.
       let surprise = "";
       if (a !== null && f !== null) {
-        const d = a - f;
-        const mag = Math.abs(d).toPrecision(2);
-        if (Math.abs(d) < 1e-9) surprise = `➡️ In line with forecast — usually a muted, range-bound reaction.`;
-        else if (d > 0) surprise = `➡️ ${mag} ABOVE forecast — hotter than expected, reads supportive for ${cur}.`;
-        else surprise = `➡️ ${mag} BELOW forecast — cooler than expected, reads bearish for ${cur}.`;
+        const relation = Math.abs(a - f) < 1e-9 ? "in line with" : a > f ? "above" : "below";
+        surprise = `➡️ Actual is ${relation} forecast. Interpret the surprise using the indicator's meaning and central-bank reaction function.`;
       }
 
       const bits = [];
@@ -686,42 +728,64 @@ async function newsPost(ctx) {
       if (e.forecast) bits.push(`Forecast ${e.forecast}`);
       if (e.previous) bits.push(`Prev ${e.previous}`);
 
-      let text =
-        `🔔 RELEASED — ${cur} · ${e.title} (${fmtClock(e.ts, settings.tz)} ${settings.place})\n` +
-        (bits.length ? bits.join(" · ") + "\n" : "") +
-        (surprise ? surprise + "\n" : "") +
-        (pairs.length ? `Pairs to watch: ${pairs.join(" · ")}\n` : "");
-
-      // Short analyst read: direction, what to trade, levels to watch.
       const groqKey = ctx.env.GROQ_API_KEY;
-      if (groqKey) {
-        try {
-          const analysis = await callGroq(groqKey, [
-            { role: "system", content: "You are a concise forex news analyst. Reply in plain text, max 110 words, no markdown, no preamble. Give exactly: (1) the market read (hawkish/dovish, beat/miss), (2) the trade bias for the listed pairs with BUY/SELL direction, (3) two concrete levels or behaviors to watch right after the release (pre-news range high/low, round numbers, sweep-and-reverse). Never promise outcomes; hedge where needed." },
-            { role: "user", content: `Event: ${cur} ${e.title}\nActual: ${e.actual} | Forecast: ${e.forecast || "n/a"} | Previous: ${e.previous || "n/a"}\nPairs: ${pairs.join(", ") || cur + " crosses"}` },
-          ]);
-          if (analysis) text += "\n" + analysis.trim() + "\n";
-        } catch (e2) { /* analysis is best-effort */ }
+      const alreadyPosted = Boolean(await kvGet(db, postKey));
+      if (!alreadyPosted) {
+        let text =
+          `🔔 RELEASED — ${cur} · ${e.title} (${fmtClock(e.ts, settings.tz)} ${settings.place})\n` +
+          (bits.length ? bits.join(" · ") + "\n" : "") +
+          (surprise ? surprise + "\n" : "") +
+          (pairs.length ? `Pairs to watch: ${pairs.join(" · ")}\n` : "");
+
+        if (groqKey) {
+          try {
+            const analysis = await callGroq(groqKey, [
+              { role: "system", content: "You are a concise forex news analyst. Reply in plain text, max 110 words, no markdown, no preamble. Give exactly: (1) indicator-specific market interpretation (hawkish/dovish, beat/miss and why), (2) a conditional bias for the listed pairs with BUY/SELL direction, (3) two concrete levels or behaviors to watch after the release. Do not infer direction from above/below alone; consider what the indicator measures. Never promise outcomes; hedge where needed." },
+              { role: "user", content: `Event: ${cur} ${e.title}\nActual: ${e.actual} | Forecast: ${e.forecast || "n/a"} | Previous: ${e.previous || "n/a"}\nPairs: ${pairs.join(", ") || cur + " crosses"}` },
+            ]);
+            if (analysis) text += "\n" + analysis.trim() + "\n";
+          } catch (e2) { console.error("Post-news analysis failed:", e2); }
+        }
+
+        const delivered = await sendTelegram(botToken, owner, text);
+        if (delivered) {
+          await kvSet(db, postKey, now);
+          sent++;
+        } else {
+          console.error("Post-news Telegram follow-up not delivered; will retry next sweep:", e.title);
+        }
       }
 
-      await sendTelegram(botToken, owner, text);
-      await kvSet(db, key, now);
-      sent++;
-
-      // Kick a fresh engine scan so concrete setup cards (entry/SL/TP) follow.
-      try {
+      // Dispatch is tracked independently from the Telegram follow-up. A
+      // successful message must never suppress retries of a failed GitHub
+      // dispatch. The sweep retries this for the rest of the 45m event window.
+      if (!(await kvGet(db, dispatchKey))) {
         const token = ctx.env.HUB_GITHUB_TOKEN;
-        if (token) {
-          const ok = await dispatchGitHub(token, "icc-engine", "icc.run", {
-            reason: "post-news scan",
-            event: cur + " " + e.title,
+        if (!token) {
+          console.error("Post-news ICC dispatch skipped: HUB_GITHUB_TOKEN unavailable");
+        } else {
+          const ok = await dispatchGitHub(token, "icc-engine", "icc.news.shadow", {
+            reason: "post-news read-only shadow scan",
+            event_id: "ff:" + e.ts + ":" + e.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 48),
+            currency: cur,
+            title: e.title,
+            impact: "HIGH",
+            event_time_ms: e.ts * 1000,
             actual: e.actual,
             forecast: e.forecast,
+            previous: e.previous,
           });
-          if (ok) await kvSet(db, "icc_dispatch", { t: Math.floor(Date.now() / 1000) });
+          if (ok) {
+            await kvSet(db, dispatchKey, now);
+            await kvSet(db, "icc_dispatch", { t: Math.floor(Date.now() / 1000) });
+          } else {
+            console.error("Post-news ICC dispatch failed; will retry next sweep:", e.title);
+          }
         }
-      } catch (e2) { /* dispatch best-effort */ }
-    } catch (e2) { /* per-event failures are fine */ }
+      }
+    } catch (e2) {
+      console.error("Post-news processing failed; will retry next sweep:", e.title, e2);
+    }
   }
   return sent;
 }
