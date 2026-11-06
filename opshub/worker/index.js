@@ -586,33 +586,64 @@ async function newsAlerts(ctx) {
     if (e.impact !== "High") continue;
     const delta = e.ts - now;
     if (delta <= 0 || delta > 45 * 60) continue;
-    const key = "ffalert:" + e.ts + ":" + e.title.slice(0, 40);
+
+    const base = e.ts + ":" + e.title.slice(0, 40);
+    const alertKey = "ffalert:" + base;
+    const guardKey = "fficcguard:" + base;
+    const cur = CURRENCIES[e.country] || e.country;
+
+    // Telegram alert and ICC guard dispatch are independent. If either side
+    // fails, its own key remains unset and the next 5m sweep retries it.
     try {
-      const seen = await kvGet(db, key);
-      if (seen) continue;
-      const mins = Math.round(delta / 60);
-      const cur = CURRENCIES[e.country] || e.country;
-      const bits = [];
-      if (e.forecast) bits.push(`Forecast ${e.forecast}`);
-      if (e.previous) bits.push(`Prev ${e.previous}`);
-      const text =
-        `🚨 HIGH IMPACT in ${mins}m (${fmtClock(e.ts, settings.tz)} ${settings.place})\n` +
-        `${cur} — ${e.title}\n` +
-        (bits.length ? bits.join(" · ") + "\n" : "") +
-        `Avoid new entries until after the release. I'll send the actual, the direction and pairs to watch right after it lands.`;
-      const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
-      const ownerRow = await kvGet(db, "report_owner");
-      const owner = ownerRow ? JSON.parse(ownerRow).chat : null;
-      if (botToken && owner) {
-        await sendTelegram(botToken, owner, text);
-        await kvSet(db, key, now);
-        sent++;
+      if (!(await kvGet(db, alertKey))) {
+        const mins = Math.round(delta / 60);
+        const bits = [];
+        if (e.forecast) bits.push(`Forecast ${e.forecast}`);
+        if (e.previous) bits.push(`Prev ${e.previous}`);
+        const text =
+          `🚨 HIGH IMPACT in ${mins}m (${fmtClock(e.ts, settings.tz)} ${settings.place})\n` +
+          `${cur} — ${e.title}\n` +
+          (bits.length ? bits.join(" · ") + "\n" : "") +
+          `Avoid new entries until after the release. ICC will enforce a temporary entry blackout and resume after the release buffer.`;
+        const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
+        const ownerRow = await kvGet(db, "report_owner");
+        const owner = ownerRow ? JSON.parse(ownerRow).chat : null;
+        if (botToken && owner) {
+          const delivered = await sendTelegram(botToken, owner, text);
+          if (delivered) {
+            await kvSet(db, alertKey, now);
+            sent++;
+          } else {
+            console.error("Pre-news Telegram alert not delivered; will retry:", e.title);
+          }
+        }
       }
-    } catch (e2) { /* per-event failures are fine */ }
+
+      if (!(await kvGet(db, guardKey))) {
+        const token = ctx.env.HUB_GITHUB_TOKEN;
+        if (!token) {
+          console.error("Pre-news ICC guard dispatch skipped: HUB_GITHUB_TOKEN unavailable");
+        } else {
+          const ok = await dispatchGitHub(token, "icc-engine", "icc.news_guard", {
+            reason: "pre-news guard",
+            currency: cur,
+            event: e.title,
+            event_ts: e.ts,
+          });
+          if (ok) {
+            await kvSet(db, guardKey, now);
+          } else {
+            console.error("Pre-news ICC guard dispatch failed; will retry next sweep:", e.title);
+          }
+        }
+      }
+    } catch (e2) {
+      console.error("Pre-news event processing failed; will retry next sweep:", e.title, e2);
+    }
   }
   try {
     await db
-      .prepare("DELETE FROM kv WHERE k LIKE 'ffalert:%' AND CAST(v AS INTEGER) < ?")
+      .prepare("DELETE FROM kv WHERE (k LIKE 'ffalert:%' OR k LIKE 'fficcguard:%') AND CAST(v AS INTEGER) < ?")
       .bind(now - 43200)
       .run();
   } catch (e) { /* pruning best-effort */ }
