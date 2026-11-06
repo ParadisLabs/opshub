@@ -164,4 +164,26 @@ http.route({
   }),
 });
 
+
+http.route({
+  path: "/dashboard/snapshot",
+  method: "GET",
+  handler: httpAction(async (ctx, req) => {
+    const expected = process.env.OPS_DASHBOARD_TOKEN;
+    const supplied = req.headers.get("authorization");
+    if (!expected || supplied !== `Bearer ${expected}`) {
+      return new Response("unauthorized", { status: 401 });
+    }
+    const data = await ctx.runQuery(internal.dashboard.snapshot, {});
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }),
+});
+
 export default http;
