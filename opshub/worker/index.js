@@ -764,11 +764,13 @@ async function newsPost(ctx) {
         if (!token) {
           console.error("Post-news ICC dispatch skipped: HUB_GITHUB_TOKEN unavailable");
         } else {
-          const ok = await dispatchGitHub(token, "icc-engine", "icc.run", {
-            reason: "post-news scan",
+          const ok = await dispatchGitHub(token, "icc-engine", "icc.news.shadow", {
+            reason: "post-news read-only shadow scan",
+            event_id: "ff:" + e.ts + ":" + e.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 48),
             currency: cur,
-            event: e.title,
-            event_ts: e.ts,
+            title: e.title,
+            impact: "HIGH",
+            event_time_ms: e.ts * 1000,
             actual: e.actual,
             forecast: e.forecast,
             previous: e.previous,
