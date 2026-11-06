@@ -17,7 +17,7 @@
 <script>
 const $=id=>document.getElementById(id);const money=n=>n==null?"—":new Intl.NumberFormat(undefined,{maximumFractionDigits:2}).format(n);const date=n=>n?new Date(n).toLocaleString():"—";
 function metric(label,value){return '<div class="metric"><small>'+label+'</small><strong>'+value+'</strong></div>'}
-function item(left,right,href){return '<div class="item"><span>'+left+'</span><span>'+right+'</span></div>'}
+function item(left,right){return '<div class="item"><span>'+left+'</span><span>'+right+'</span></div>'}
 function safe(s){return String(s??"—").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function render(d){$("dashboard").classList.remove("hidden");$("updated").textContent="Updated "+date(d.generatedAt);
 $("metrics").innerHTML=[metric("Open ICC positions",d.trading.open),metric("ICC net result · 30d",money(d.trading.netR30d)+"R"),metric("ICC win rate · 30d",d.trading.winRatePct==null?"No closed trades":d.trading.winRatePct+"%"),metric("Active deal leads",d.flip.activeDeals),metric("Episodes produced · 30d",d.studios.produced30d),metric("Dispatch failures · 24h",d.operations.dispatchFailures24h)].join("");
@@ -28,5 +28,5 @@ $("ops").innerHTML='<p class="muted">'+d.operations.dispatches24h+' dispatches �
 $("reminders").innerHTML=d.reminders.map(x=>item(safe(x.text),date(x.dueAt))).join("")||'<p class="muted">No open reminders.</p>';
 $("activity").innerHTML='<p>Entries: <b>'+d.activity.entries30d+'</b></p><p>Income: <b>'+money(d.activity.income30d)+'</b></p><p>Expenses: <b>'+money(d.activity.expense30d)+'</b></p>';
 }
-$("connect").onclick=async()=>{const url=$("endpoint").value.trim(),token=$("token").value.trim();$("status").textContent="Connecting…";try{const r=await fetch(url,{headers:{Authorization:"Bearer "+token}});if(!r.ok)throw Error("HTTP "+r.status+" — check endpoint, token and Convex deployment");render(await r.json());$("status").textContent="Connected. Read-only access confirmed.";}catch(e){$("status").textContent="Connection failed: "+e.message;}};
+$("connect").onclick=async()=>{const url=$("endpoint").value.trim(),token=$("token").value.trim();$("status").textContent="Connecting…";try{if(new URL(url).protocol!=="https:")throw Error("Use an HTTPS Convex endpoint");if(!token)throw Error("Dashboard token is required");const r=await fetch(url,{headers:{Authorization:"Bearer "+token}});if(!r.ok)throw Error("HTTP "+r.status+" — check endpoint, token and Convex deployment");render(await r.json());$("status").textContent="Connected. Read-only access confirmed.";}catch(e){$("status").textContent="Connection failed: "+e.message;}};
 </script></body></html>
