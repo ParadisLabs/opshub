@@ -387,6 +387,35 @@ export const handleUpdate = internalAction({
 
     const text = msg.text.trim();
 
+    // Deterministic production commands: no AI interpretation required.
+    const runCommand = text.match(/^\\/run\\s+(all|icc|flip|english|turkce|turkish|history)\\s*$/i);
+    if (runCommand) {
+      const target = runCommand[1].toLowerCase();
+      let result: any;
+      if (target === "all") {
+        result = await ctx.runAction(internal.engineDispatch.runAll, {});
+      } else if (target === "icc" || target === "flip") {
+        result = await ctx.runAction(internal.engineDispatch.dispatchEngine, {
+          engineKey: target,
+          reason: "telegram /run " + target,
+        });
+      } else {
+        const studioKey = target === "turkish" ? "turkce" : target;
+        result = await ctx.runAction(internal.dispatch.runStudio, {
+          studioKey,
+          reason: "telegram /run " + target,
+        });
+      }
+      const rows = result.results ?? [result];
+      const report = rows.map((row: any) =>
+        `${row.studio ?? row.engine ?? "target"}: ${row.ok ? "queued" : "FAILED"}${row.detail ? " — " + row.detail : row.error ? " — " + row.error : ""}`
+      ).join("\\n");
+      const reply = `${result.ok ? "✅" : "⚠️"} Telegram dispatch report\\n${report}\\n\\nQueued means GitHub accepted the event; check Actions for the actual run result.`;
+      await ctx.runMutation(internal.tools.appendChat, { chatId, userText: text, botText: reply });
+      await sendTelegram(token, chatId, reply);
+      return;
+    }
+
     // 1) Mechanical confirm/cancel of a staged record — no AI needed
     const pending = await ctx.runQuery(internal.tools.getPending, { chatId });
     if (pending) {
