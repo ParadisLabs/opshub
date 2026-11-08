@@ -79,3 +79,22 @@ curl -s https://<hub>/api-readiness | python3 -m json.tool   # names only, no va
 - No public publishing path is enabled, by design.
 - R2 (`FILES`) bucket is configured but not provisioned; renders currently live
   only in the studio workspace.
+
+## Dashboard and verification tools
+
+| Surface | Purpose |
+| --- | --- |
+| `GET /dashboard` | read-only operator view: studio cards, productions, API readiness, review queue |
+| `npm run preflight` | deployment readiness: config, bindings, manifests, secret scan, env names |
+| `python3 -m unittest discover -s opshub/shared/tests` | offline suites; render tests run only when ffmpeg/ffprobe are on PATH |
+
+Dashboard writes are intentionally disabled: approvals remain signed actions via
+Telegram `/approve <job_id>`, and publishing stays off even after approval.
+
+FFmpeg without a system install (no root needed):
+
+```bash
+python3 -m venv /tmp/ffvenv
+/tmp/ffvenv/bin/pip install static-ffmpeg
+export PATH="$(/tmp/ffvenv/bin/python -c 'from static_ffmpeg import run; print(run.get_or_fetch_platform_executables_else_raise()[0].rsplit("/",1)[0])'):$PATH"
+```

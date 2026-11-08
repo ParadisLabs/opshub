@@ -34,6 +34,7 @@ import {
   registerProductionRoutes,
   updateProduction,
 } from "./productions.js";
+import { dashboardHtml } from "./dashboard.js";
 
 const app = new Hono();
 const VERSION = "3.3.0";
@@ -84,6 +85,18 @@ const FEEDS = [
 // --- health ---
 app.get("/", async (ctx) => {
   return ctx.json({ status: "ok", version: VERSION, mode: "Telegram-first" });
+});
+
+// Read-only operator dashboard. Writes stay on signed Telegram/HTTP paths.
+app.get("/dashboard", async (ctx) => {
+  return new Response(dashboardHtml(VERSION), {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
 });
 
 // ---------------- helpers ----------------
