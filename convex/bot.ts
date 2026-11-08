@@ -388,7 +388,7 @@ export const handleUpdate = internalAction({
     const text = msg.text.trim();
 
     // Deterministic production commands: no AI interpretation required.
-    const runCommand = text.match(/^\\/run\\s+(all|icc|flip|english|turkce|turkish|history)\\s*$/i);
+    const runCommand = text.match(/^\/run\s+(all|icc|flip|english|turkce|turkish|history)\s*$/i);
     if (runCommand) {
       const target = runCommand[1].toLowerCase();
       let result: any;
@@ -409,7 +409,7 @@ export const handleUpdate = internalAction({
       const rows = result.results ?? [result];
       const report = rows.map((row: any) =>
         `${row.studio ?? row.engine ?? "target"}: ${row.ok ? "queued" : "FAILED"}${row.detail ? " — " + row.detail : row.error ? " — " + row.error : ""}`
-      ).join("\\n");
+      ).join("\n");
       const reply = `${result.ok ? "✅" : "⚠️"} Telegram dispatch report\\n${report}\\n\\nQueued means GitHub accepted the event; check Actions for the actual run result.`;
       await ctx.runMutation(internal.tools.appendChat, { chatId, userText: text, botText: reply });
       await sendTelegram(token, chatId, reply);
