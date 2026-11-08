@@ -29,7 +29,7 @@ def checkouts():
     Skip honestly instead of failing: the assertions below still run for every
     studio that is actually checked out next to this repo.
     """
-    return {s: s for s in STUDIOS
+    return {s: STUDIOS[s] for s in STUDIOS
             if os.path.exists(os.path.join(ROOT, s, "job_report.py"))}
 
 
