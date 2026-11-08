@@ -26,6 +26,14 @@
  */
 
 import { Hono } from "hono";
+import {
+  TERMINAL_JOBS,
+  canonStudio,
+  createProduction,
+  getProduction,
+  registerProductionRoutes,
+  updateProduction,
+} from "./productions.js";
 
 const app = new Hono();
 const VERSION = "3.3.0";
@@ -155,6 +163,40 @@ async function kvSet(db, k, v) {
     .run();
 }
 
+// ---------------- R2: durable content storage (FILES bucket) ----------------
+async function storeFile(FILES, path, data) {
+  try {
+    const stored = await FILES.put(path, data, {
+      httpMetadata: { contentType: "image/png" },
+      cacheControl: "max-age: 86400, public",
+    });
+    return { stored: true, url: stored.url };
+  } catch (e) {
+    console.error("storeFile failed:", e);
+    return { stored: false, reason: String(e).slice(0, 200) };
+  }
+}
+async function readFile(FILES, path) {
+  try {
+    const obj = await FILES.get(path);
+    if (!obj || !obj.body) return null;
+    const buf = await obj.body.arrayBuffer();
+    return Buffer.from(buf);
+  } catch (e) {
+    console.error("readFile failed:", e);
+    return null;
+  }
+}
+async function deleteFile(FILES, path) {
+  try {
+    await FILES.delete(path);
+    return { deleted: true };
+  } catch (e) {
+    console.error("deleteFile failed:", e);
+    return { deleted: false, reason: String(e).slice(0, 200) };
+  }
+}
+
 // ---------------- D1: tables ----------------
 async function ensureTables(db) {
   await db
@@ -181,6 +223,11 @@ async function ensureTables(db) {
   await db
     .prepare(
       "CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, service TEXT, kind TEXT, status TEXT, detail TEXT, url TEXT, created_at INTEGER, updated_at INTEGER)"
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE TABLE IF NOT EXISTS productions (job_id TEXT PRIMARY KEY, studio TEXT NOT NULL, topic TEXT, status TEXT NOT NULL, stage TEXT, progress INTEGER DEFAULT 0, detail TEXT, output TEXT, qa TEXT, approved_at INTEGER, created_at INTEGER, updated_at INTEGER)"
     )
     .run();
 }
@@ -1761,6 +1808,111 @@ async function handleCommand(text, chatId, ctx, settings) {
       return "Could not forget: " + String(e).slice(0, 120);
     }
   }
+  if (text === "/studios") {
+    if (!db) return "No database — studio state unavailable.";
+    try {
+      await ensureTables(db);
+      const r = await db
+        .prepare("SELECT studio, status, stage, progress, updated_at FROM productions ORDER BY updated_at DESC LIMIT 60")
+        .all();
+      const rows = r.results || [];
+      if (!rows.length) return "No productions recorded yet. Use /run <studio> to dispatch one.";
+      const latest = {};
+      for (const row of rows) if (!latest[row.studio]) latest[row.studio] = row;
+      return (
+        "🎬 Studios:\n" +
+        Object.entries(latest)
+          .map(([s, j]) => `${s}: ${j.status} · ${j.stage} · ${j.progress}%`)
+          .join("\n") +
+        "\n\nApproval and publishing stay manual."
+      );
+    } catch (e) {
+      return "Could not read studios: " + String(e).slice(0, 120);
+    }
+  }
+  if (/^\/run\b/.test(text)) {
+    const arg = (text.split(/\s+/)[1] || "").toLowerCase();
+    const targets =
+      arg === "all"
+        ? ["trendscope", "true-crime", "deep-history"]
+        : [canonStudio(arg)].filter(Boolean);
+    if (!targets.length) return "Usage: /run english | /run turkce | /run history | /run all";
+    const token = ctx.env.HUB_GITHUB_TOKEN;
+    if (!token) return "Cannot dispatch: HUB_GITHUB_TOKEN is not configured on the hub.";
+    const lines = [];
+    for (const studio of targets) {
+      const jobId = `${studio}-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        await ensureTables(db);
+        await createProduction(db, {
+          job_id: jobId, studio, status: "dispatched", stage: "research",
+          detail: "telegram /run", production_mode: "test",
+        });
+        const ok = await dispatchGitHub(token, STUDIO_REPO[studio], "opshub.produce", {
+          schema_version: "1.0", event: "opshub.produce", job_id: jobId, studio,
+          topic: "", language: studio === "true-crime" ? "tr" : "en",
+          format: "short", requested_by: "telegram", production_mode: "test",
+          approval_required: true,
+        });
+        await recordJob(db, {
+          job_id: `dispatch:${jobId}`, service: STUDIO_REPO[studio],
+          kind: "repository_dispatch", status: ok ? "dispatched" : "dispatch_failed",
+          detail: jobId,
+        });
+        lines.push(`${studio}: ${ok ? "dispatched (not a production yet)" : "dispatch FAILED"}`);
+      } catch (e) {
+        lines.push(`${studio}: dispatch error ${String(e).slice(0, 60)}`);
+      }
+    }
+    return lines.join("\n") + "\nTracking: /jobs";
+  }
+  if (/^\/(approve|cancel|retry)\b/.test(text)) {
+    const parts = text.split(/\s+/);
+    const verb = parts[0].slice(1);
+    const id = parts[1];
+    if (!id) return `Usage: /${verb} JOB_ID`;
+    if (!db) return "No database.";
+    try {
+      await ensureTables(db);
+      const job = await getProduction(db, id);
+      if (!job) return `No job ${id}. Use /jobs to list.`;
+      if (verb === "approve") {
+        if (!["quality_review", "awaiting_approval"].includes(job.status))
+          return `Cannot approve ${id} while ${job.status}.`;
+        await updateProduction(db, id, {
+          status: "approved", approved_at: nowSec(), detail: "approved from Telegram",
+        });
+        return `✅ ${id} approved for the next authorized stage. Publishing is still disabled.`;
+      }
+      if (verb === "cancel") {
+        if (job.status === "complete") return `${id} is already complete.`;
+        await updateProduction(db, id, { status: "cancelled", detail: "cancelled from Telegram" });
+        return `🛑 ${id} cancelled.`;
+      }
+      if (TERMINAL_JOBS.has(job.status)) return `Cannot retry ${id} while ${job.status}.`;
+      await updateProduction(db, id, {
+        status: "accepted", stage: "research", progress: 0,
+        detail: "retry requested from Telegram",
+      });
+      return `🔁 ${id} marked for retry — the studio re-runs on its next dispatch.`;
+    } catch (e) {
+      return "Job action failed: " + String(e).slice(0, 120);
+    }
+  }
+  if (text === "/storage") {
+    if (!db) return "No database.";
+    try {
+      await ensureTables(db);
+      const total = await db.prepare("SELECT COUNT(*) AS n FROM productions").first();
+      const done = await db.prepare("SELECT COUNT(*) AS n FROM productions WHERE status = 'complete'").first();
+      return (
+        `🗄 Productions: ${total ? total.n : 0} total · ${done ? done.n : 0} complete\n` +
+        `Durable object storage: ${ctx.env.FILES ? "FILES binding present" : "not provisioned — renders only exist in the studio workspace"}`
+      );
+    } catch (e) {
+      return "Storage read failed: " + String(e).slice(0, 120);
+    }
+  }
   if (text === "/weather") return weatherTextCmd(ctx, settings);
   if (text === "/news") return newsBlock(ctx, settings, { limit: 8 });
   if (text === "/headlines") {
@@ -2516,6 +2668,14 @@ app.post("/debug-ai", async (ctx) => {
   } catch (e) {
     return ctx.json({ error: e.message }, 500);
   }
+});
+
+registerProductionRoutes(app, {
+  ensureTables,
+  recordJob,
+  verifySignature,
+  dispatchGitHub,
+  HTTP_UNAVAILABLE,
 });
 
 export default app;
