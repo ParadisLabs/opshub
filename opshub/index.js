@@ -2019,7 +2019,9 @@ function fmtDayClock(epoch, tz) {
   return `${pad2(p.d)}.${pad2(p.mo)} ${pad2(p.h)}:${pad2(p.mi)}`;
 }
 async function verifySignature(rawBody, header, secret) {
-  if (!secret) return true;
+  // Fail closed: without a configured secret nothing can be verified, so an
+  // unsigned request must be rejected rather than trusted.
+  if (!secret) return false;
   if (!header) return false;
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
