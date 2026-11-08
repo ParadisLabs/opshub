@@ -403,7 +403,8 @@ export const handleUpdate = internalAction({
         const aliases: Record<string, string> = {
           turkish: "turkce", truecrime: "turkce", "true-crime": "turkce",
           trendscope: "english", "deep-history": "history", deep_history: "history",
-        };\n        const studioKey = aliases[target] ?? target;
+        };
+        const studioKey = aliases[target] ?? target;
         result = await ctx.runAction(internal.dispatch.runStudio, {
           studioKey,
           reason: "telegram /run " + target,
