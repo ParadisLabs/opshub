@@ -52,6 +52,7 @@ export function dashboardHtml(version = "3.3.0") {
   .bar { height: 6px; background: #0a1219; border-radius: 999px; overflow: hidden; margin: 10px 0 6px; }
   .bar > i { display: block; height: 100%; background: var(--accent); width: 0%; transition: width .4s; }
   .meta { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+  .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
     text-transform: uppercase; letter-spacing: .06em; padding: 8px 10px; border-bottom: 1px solid var(--line); }
@@ -68,7 +69,13 @@ export function dashboardHtml(version = "3.3.0") {
   section { margin-top: 22px; }
   .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
   .ok { color: var(--ok); } .bad { color: var(--bad); } .muted { color: var(--muted); }
-  @media (max-width: 640px) { main { padding: 14px; } td.detail { display: none; } }
+  @media (max-width: 640px) {
+    main { padding: 14px; }
+    th.detail, td.detail { display: none; }
+    th, td { padding: 8px 6px; }
+    h1 { font-size: 16px; }
+    .studios { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -87,6 +94,7 @@ export function dashboardHtml(version = "3.3.0") {
   <section>
     <div class="card">
       <h2>Productions</h2>
+      <div class="table-wrap">
       <table>
         <thead><tr>
           <th>Job</th><th>Studio</th><th>Status</th><th>Stage</th><th>Progress</th>
@@ -94,6 +102,7 @@ export function dashboardHtml(version = "3.3.0") {
         </tr></thead>
         <tbody id="jobs" data-testid="jobs"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
       </table>
+      </div>
       <p class="note">Approvals are signed actions: use Telegram <span class="mono">/approve JOB_ID</span>.
         Publishing stays disabled even after approval.</p>
     </div>
@@ -205,8 +214,9 @@ export function dashboardHtml(version = "3.3.0") {
       host.appendChild(chip);
     });
     var note = document.getElementById("readiness-note");
-    note.textContent = (data.note || "") +
-      " Publishing enabled: " + (data.publishing_enabled ? "yes" : "no") + ".";
+    var explain = String(data.note || "").trim().replace(/[.;:,]\s*$/, "");
+    note.textContent = (explain ? explain + ". " : "") +
+      "Publishing enabled: " + (data.publishing_enabled ? "yes" : "no") + ".";
   }
 
   function renderReview(jobs) {
