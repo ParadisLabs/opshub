@@ -44,7 +44,12 @@ export const STUDIOS = [
 ] as const;
 
 function studioByKey(key?: string | null) {
-  const k = (key ?? "").trim().toLowerCase();
+  const raw = (key ?? "").trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    trendscope: "english", truecrime: "turkce", "true-crime": "turkce",
+    turkish: "turkce", "deep-history": "history", deep_history: "history",
+  };
+  const k = aliases[raw] ?? raw;
   return STUDIOS.find((s) => s.key === k || s.repo.toLowerCase() === k) ?? null;
 }
 
