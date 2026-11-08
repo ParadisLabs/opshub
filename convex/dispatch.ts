@@ -37,8 +37,8 @@ export const STUDIOS = [
     key: "history",
     brand: "deep_history",
     repo: "landryparadis012-git/deep-history-studio",
-    label: "Deep History (Turkish)",
-    language: "tr",
+    label: "Deep History English",
+    language: "en",
     maxEpisodes: 0,
   },
 ] as const;
