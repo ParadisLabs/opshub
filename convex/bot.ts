@@ -275,7 +275,7 @@ const TOOLS = [
         parameters: {
           type: "object",
           properties: {
-            studio: { type: "string", description: "turkce | english | history" },
+            studio: { type: "string", description: "turkce/truecrime | english/trendscope | history/deep-history" },
             topic: { type: "string", description: "optional brief for this one episode" },
           },
           required: ["studio"],
@@ -388,7 +388,7 @@ export const handleUpdate = internalAction({
     const text = msg.text.trim();
 
     // Deterministic production commands: no AI interpretation required.
-    const runCommand = text.match(/^\/run\s+(all|icc|flip|english|turkce|turkish|history)\s*$/i);
+    const runCommand = text.match(/^\/run\s+(all|icc|flip|english|trendscope|turkce|turkish|truecrime|true-crime|history|deep-history|deep_history)\s*$/i);
     if (runCommand) {
       const target = runCommand[1].toLowerCase();
       let result: any;
@@ -400,7 +400,7 @@ export const handleUpdate = internalAction({
           reason: "telegram /run " + target,
         });
       } else {
-        const studioKey = target === "turkish" ? "turkce" : target;
+        const aliases: Record<string, string> = {\n          turkish: "turkce", truecrime: "turkce", "true-crime": "turkce",\n          trendscope: "english", "deep-history": "history", deep_history: "history",\n        };\n        const studioKey = aliases[target] ?? target;
         result = await ctx.runAction(internal.dispatch.runStudio, {
           studioKey,
           reason: "telegram /run " + target,
