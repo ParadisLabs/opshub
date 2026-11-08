@@ -19,22 +19,25 @@ const WINDOW_MS = 15 * 60_000; // how late a schedule may fire and still count
 export const STUDIOS = [
   {
     key: "turkce",
+    brand: "true_crime",
     repo: "landryparadis012-git/faceless-turkce-studio",
-    label: "Faceless Türkçe",
+    label: "True Crime — Türkçe",
     language: "tr",
     maxEpisodes: 8,
   },
   {
     key: "english",
+    brand: "trendscope",
     repo: "landryparadis012-git/faceless-studio",
-    label: "Faceless English",
+    label: "TrendScope — English",
     language: "en",
     maxEpisodes: 8,
   },
   {
     key: "history",
+    brand: "deep_history",
     repo: "landryparadis012-git/deep-history-studio",
-    label: "Deep History",
+    label: "Deep History — Türkçe",
     language: "tr",
     maxEpisodes: 0,
   },
@@ -256,6 +259,8 @@ export const dispatch = internalAction({
 
     const payload = {
       topic: a.topic ?? "",
+      brand: studio.brand,
+      language: studio.language,
       new_series: a.newSeries === true,
       max_episodes: a.maxEpisodes ?? (studio.maxEpisodes || undefined),
       reason: a.reason ?? `opshub ${kind}`,
