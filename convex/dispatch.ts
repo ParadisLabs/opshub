@@ -361,6 +361,10 @@ export const createSeriesEverywhere = internalAction({
  */
 export const runDueSchedules = internalAction({
   handler: async (ctx) => {
+    // Fail closed: scheduled studio dispatches stay paused until explicitly enabled.
+    if (process.env.STUDIO_SCHEDULING_ENABLED !== "true") {
+      return { fired: [], paused: true, reason: "STUDIO_SCHEDULING_ENABLED is not true" };
+    }
     const { timezone } = await readSettings(ctx);
     const now = Date.now();
     const schedules: any[] = await ctx.runQuery(internal.dispatch.enabledSchedules, {});
