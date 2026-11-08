@@ -275,7 +275,7 @@ const TOOLS = [
         parameters: {
           type: "object",
           properties: {
-            studio: { type: "string", description: "turkce | english | history" },
+            studio: { type: "string", description: "turkce/truecrime | english/trendscope | history/deep-history" },
             topic: { type: "string", description: "optional brief for this one episode" },
           },
           required: ["studio"],
@@ -386,6 +386,35 @@ export const handleUpdate = internalAction({
     if (String(chatId) !== allowed) return;
 
     const text = msg.text.trim();
+
+    // Deterministic production commands: no AI interpretation required.
+    const runCommand = text.match(/^\/run\s+(all|icc|flip|english|trendscope|turkce|turkish|truecrime|true-crime|history|deep-history|deep_history)\s*$/i);
+    if (runCommand) {
+      const target = runCommand[1].toLowerCase();
+      let result: any;
+      if (target === "all") {
+        result = await ctx.runAction(internal.engineDispatch.runAll, {});
+      } else if (target === "icc" || target === "flip") {
+        result = await ctx.runAction(internal.engineDispatch.dispatchEngine, {
+          engineKey: target,
+          reason: "telegram /run " + target,
+        });
+      } else {
+        const aliases: Record<string, string> = {\n          turkish: "turkce", truecrime: "turkce", "true-crime": "turkce",\n          trendscope: "english", "deep-history": "history", deep_history: "history",\n        };\n        const studioKey = aliases[target] ?? target;
+        result = await ctx.runAction(internal.dispatch.runStudio, {
+          studioKey,
+          reason: "telegram /run " + target,
+        });
+      }
+      const rows = result.results ?? [result];
+      const report = rows.map((row: any) =>
+        `${row.studio ?? row.engine ?? "target"}: ${row.ok ? "queued" : "FAILED"}${row.detail ? " — " + row.detail : row.error ? " — " + row.error : ""}`
+      ).join("\n");
+      const reply = `${result.ok ? "✅" : "⚠️"} Telegram dispatch report\n${report}\n\nQueued means GitHub accepted the event; check Actions for the actual run result.`;
+      await ctx.runMutation(internal.tools.appendChat, { chatId, userText: text, botText: reply });
+      await sendTelegram(token, chatId, reply);
+      return;
+    }
 
     // 1) Mechanical confirm/cancel of a staged record — no AI needed
     const pending = await ctx.runQuery(internal.tools.getPending, { chatId });
