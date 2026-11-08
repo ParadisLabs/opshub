@@ -35,6 +35,7 @@ import {
   updateProduction,
 } from "./productions.js";
 import { dashboardHtml } from "./dashboard.js";
+import { registerFileRoutes } from "./files.js";
 
 const app = new Hono();
 const VERSION = "3.3.0";
@@ -176,39 +177,8 @@ async function kvSet(db, k, v) {
     .run();
 }
 
-// ---------------- R2: durable content storage (FILES bucket) ----------------
-async function storeFile(FILES, path, data) {
-  try {
-    const stored = await FILES.put(path, data, {
-      httpMetadata: { contentType: "image/png" },
-      cacheControl: "max-age: 86400, public",
-    });
-    return { stored: true, url: stored.url };
-  } catch (e) {
-    console.error("storeFile failed:", e);
-    return { stored: false, reason: String(e).slice(0, 200) };
-  }
-}
-async function readFile(FILES, path) {
-  try {
-    const obj = await FILES.get(path);
-    if (!obj || !obj.body) return null;
-    const buf = await obj.body.arrayBuffer();
-    return Buffer.from(buf);
-  } catch (e) {
-    console.error("readFile failed:", e);
-    return null;
-  }
-}
-async function deleteFile(FILES, path) {
-  try {
-    await FILES.delete(path);
-    return { deleted: true };
-  } catch (e) {
-    console.error("deleteFile failed:", e);
-    return { deleted: false, reason: String(e).slice(0, 200) };
-  }
-}
+// R2 access lives in ./files.js: the old helpers here used Buffer, which does
+// not exist in the Workers runtime, so they would have thrown on first use.
 
 // ---------------- D1: tables ----------------
 async function ensureTables(db) {
@@ -2690,6 +2660,9 @@ registerProductionRoutes(app, {
   dispatchGitHub,
   HTTP_UNAVAILABLE,
 });
+
+// Signed R2 object storage (upload / read / list / delete).
+registerFileRoutes(app, { verifySignature, HTTP_UNAVAILABLE });
 
 export default app;
 
