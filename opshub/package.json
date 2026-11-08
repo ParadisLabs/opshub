@@ -5,7 +5,12 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node test/hub.test.mjs"
+    "test": "node test/hub.test.mjs",
+    "test:jobs": "node test/jobs.test.mjs",
+    "test:dashboard": "node test/dashboard.test.mjs",
+    "test:files": "node test/files.test.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "provision:r2": "node scripts/provision-r2.mjs"
   },
   "dependencies": {
     "hono": "^4.0.0",

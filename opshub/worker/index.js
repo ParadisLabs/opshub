@@ -26,9 +26,20 @@
  */
 
 import { Hono } from "hono";
+import {
+  TERMINAL_JOBS,
+  canonStudio,
+  createProduction,
+  getProduction,
+  registerProductionRoutes,
+  updateProduction,
+} from "./productions.js";
+import { dashboardHtml } from "./dashboard.js";
+import { registerFileRoutes } from "./files.js";
 
 const app = new Hono();
 const VERSION = "3.3.0";
+const HTTP_UNAVAILABLE = { error: "hub misconfigured" };
 const REPOS = [
   { name: "faceless-studio", event: "opshub.produce" },
   { name: "faceless-turkce-studio", event: "opshub.produce" },
@@ -75,6 +86,18 @@ const FEEDS = [
 // --- health ---
 app.get("/", async (ctx) => {
   return ctx.json({ status: "ok", version: VERSION, mode: "Telegram-first" });
+});
+
+// Read-only operator dashboard. Writes stay on signed Telegram/HTTP paths.
+app.get("/dashboard", async (ctx) => {
+  return new Response(dashboardHtml(VERSION), {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
 });
 
 // ---------------- helpers ----------------
@@ -163,6 +186,9 @@ async function kvSet(db, k, v) {
     .run();
 }
 
+// R2 access lives in ./files.js: the old helpers here used Buffer, which does
+// not exist in the Workers runtime, so they would have thrown on first use.
+
 // ---------------- D1: tables ----------------
 async function ensureTables(db) {
   await db
@@ -189,6 +215,11 @@ async function ensureTables(db) {
   await db
     .prepare(
       "CREATE TABLE IF NOT EXISTS jobs (job_id TEXT PRIMARY KEY, service TEXT, kind TEXT, status TEXT, detail TEXT, url TEXT, created_at INTEGER, updated_at INTEGER)"
+    )
+    .run();
+  await db
+    .prepare(
+      "CREATE TABLE IF NOT EXISTS productions (job_id TEXT PRIMARY KEY, studio TEXT NOT NULL, topic TEXT, status TEXT NOT NULL, stage TEXT, progress INTEGER DEFAULT 0, detail TEXT, output TEXT, qa TEXT, approved_at INTEGER, created_at INTEGER, updated_at INTEGER)"
     )
     .run();
 }
@@ -277,7 +308,7 @@ function fmtDayClock(epoch, tz) {
 
 // ---------------- HMAC (events from studios / icc-engine) ----------------
 async function verifySignature(rawBody, header, secret) {
-  if (!secret) return true;
+  if (!secret) return false;
   if (!header) return false;
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -1269,7 +1300,8 @@ async function failureWatch(ctx, opts) {
       continue;
     }
     for (const run of runs) {
-      if (!["failure", "timed_out", "cancelled"].includes(run.conclusion || "")) continue;
+      // cancelled/superseded runs are not real failures — only report true failures
+      if (!["failure", "timed_out"].includes(run.conclusion || "")) continue;
       if (Date.parse(run.created_at) < cutoff) continue;
       const key = `fail:${name}:${run.id}`;
       try {
@@ -1713,7 +1745,14 @@ async function handleCommand(text, chatId, ctx, settings) {
     return "Registered repos:\n" + REPOS.map((r) => `• ${r.name} (${r.event})`).join("\n");
   }
   if (text === "/status") {
-    return `Hub status: OK\nVersion: ${VERSION}\nMode: Telegram-first\nLocation: ${settings.place} (${settings.tz})\nLocal time: ${localParts(new Date(), settings.tz).hhmm}\nReminders: D1-backed (swept every 5m by Convex cron)\nNews alerts: 45m before High impact`;
+    const statuses = (await repoStatuses(ctx)) || [];
+    const lines = [`Hub status: OK`, `Version: ${VERSION}`, `Mode: Telegram-first`, `Location: ${settings.place} (${settings.tz})`, `Local time: ${localParts(new Date(), settings.tz).hhmm}`, `Reminders: D1-backed (swept every 5m by Convex cron)`, `News alerts: 45m before High impact`, ``, `Services (last run per repo):`];
+    for (const s of statuses) {
+      const icon = iconFor(s.result, s.state);
+      const when = s.at ? ago(s.at) : "";
+      lines.push(`${icon} ${s.repo} — ${s.result}${when ? ` (${when})` : ""}${s.state === "in_progress" || s.state === "queued" ? ` (${s.state})` : ""}`);
+    }
+    return lines.join("\n");
   }
   if (text === "/health") {
     try { return await healthText(ctx, settings); }
@@ -1732,6 +1771,35 @@ async function handleCommand(text, chatId, ctx, settings) {
       }).join("\n");
     } catch (e) {
       return "Could not read the job ledger: " + String(e).slice(0, 120);
+    }
+  }
+  if (text === "/close") {
+    if (!db) return "No database — can't close trades here.";
+    try {
+      await ensureTables(db);
+      const chat = String(chatId);
+      const data = "C|close";
+      const existing = await db
+        .prepare("SELECT id FROM tgacks WHERE target = 'icc' AND data = ? AND chat_id = ? ORDER BY id DESC LIMIT 1")
+        .bind(data, chat)
+        .first();
+      if (existing) {
+        return "Close already queued for this chat — the engine applies it on its next scan. Use /status for service health.";
+      }
+      await db
+        .prepare("INSERT INTO tgacks(target,data,chat_id,message_id,created_at) VALUES(?,?,?,?,?)")
+        .bind("icc", data, chat, "cmd-close-" + Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000))
+        .run();
+      await recordJob(db, {
+        job_id: `ack:close:${chat}:${Math.floor(Date.now() / 1000)}`,
+        service: "icc-engine",
+        kind: "telegram_command",
+        status: "C|close",
+        detail: `typed /close by chat ${chat} → relayed to /acks for the next engine scan`,
+      });
+      return "✅ Close queued — icc-engine applies C|close on its next scan (closes the most recent open trade).";
+    } catch (e) {
+      return "Could not queue close: " + String(e).slice(0, 120);
     }
   }
   if (text === "/report" || text === "/daily") {
@@ -1785,6 +1853,111 @@ async function handleCommand(text, chatId, ctx, settings) {
         : `Nothing found for chain "${chain}".`;
     } catch (e) {
       return "Could not forget: " + String(e).slice(0, 120);
+    }
+  }
+  if (text === "/studios") {
+    if (!db) return "No database — studio state unavailable.";
+    try {
+      await ensureTables(db);
+      const r = await db
+        .prepare("SELECT studio, status, stage, progress, updated_at FROM productions ORDER BY updated_at DESC LIMIT 60")
+        .all();
+      const rows = r.results || [];
+      if (!rows.length) return "No productions recorded yet. Use /run <studio> to dispatch one.";
+      const latest = {};
+      for (const row of rows) if (!latest[row.studio]) latest[row.studio] = row;
+      return (
+        "🎬 Studios:\n" +
+        Object.entries(latest)
+          .map(([s, j]) => `${s}: ${j.status} · ${j.stage} · ${j.progress}%`)
+          .join("\n") +
+        "\n\nApproval and publishing stay manual."
+      );
+    } catch (e) {
+      return "Could not read studios: " + String(e).slice(0, 120);
+    }
+  }
+  if (/^\/run\b/.test(text)) {
+    const arg = (text.split(/\s+/)[1] || "").toLowerCase();
+    const targets =
+      arg === "all"
+        ? ["trendscope", "true-crime", "deep-history"]
+        : [canonStudio(arg)].filter(Boolean);
+    if (!targets.length) return "Usage: /run english | /run turkce | /run history | /run all";
+    const token = ctx.env.HUB_GITHUB_TOKEN;
+    if (!token) return "Cannot dispatch: HUB_GITHUB_TOKEN is not configured on the hub.";
+    const lines = [];
+    for (const studio of targets) {
+      const jobId = `${studio}-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        await ensureTables(db);
+        await createProduction(db, {
+          job_id: jobId, studio, status: "dispatched", stage: "research",
+          detail: "telegram /run", production_mode: "test",
+        });
+        const ok = await dispatchGitHub(token, STUDIO_REPO[studio], "opshub.produce", {
+          schema_version: "1.0", event: "opshub.produce", job_id: jobId, studio,
+          topic: "", language: studio === "true-crime" ? "tr" : "en",
+          format: "short", requested_by: "telegram", production_mode: "test",
+          approval_required: true,
+        });
+        await recordJob(db, {
+          job_id: `dispatch:${jobId}`, service: STUDIO_REPO[studio],
+          kind: "repository_dispatch", status: ok ? "dispatched" : "dispatch_failed",
+          detail: jobId,
+        });
+        lines.push(`${studio}: ${ok ? "dispatched (not a production yet)" : "dispatch FAILED"}`);
+      } catch (e) {
+        lines.push(`${studio}: dispatch error ${String(e).slice(0, 60)}`);
+      }
+    }
+    return lines.join("\n") + "\nTracking: /jobs";
+  }
+  if (/^\/(approve|cancel|retry)\b/.test(text)) {
+    const parts = text.split(/\s+/);
+    const verb = parts[0].slice(1);
+    const id = parts[1];
+    if (!id) return `Usage: /${verb} JOB_ID`;
+    if (!db) return "No database.";
+    try {
+      await ensureTables(db);
+      const job = await getProduction(db, id);
+      if (!job) return `No job ${id}. Use /jobs to list.`;
+      if (verb === "approve") {
+        if (!["quality_review", "awaiting_approval"].includes(job.status))
+          return `Cannot approve ${id} while ${job.status}.`;
+        await updateProduction(db, id, {
+          status: "approved", approved_at: nowSec(), detail: "approved from Telegram",
+        });
+        return `✅ ${id} approved for the next authorized stage. Publishing is still disabled.`;
+      }
+      if (verb === "cancel") {
+        if (job.status === "complete") return `${id} is already complete.`;
+        await updateProduction(db, id, { status: "cancelled", detail: "cancelled from Telegram" });
+        return `🛑 ${id} cancelled.`;
+      }
+      if (TERMINAL_JOBS.has(job.status)) return `Cannot retry ${id} while ${job.status}.`;
+      await updateProduction(db, id, {
+        status: "accepted", stage: "research", progress: 0,
+        detail: "retry requested from Telegram",
+      });
+      return `🔁 ${id} marked for retry — the studio re-runs on its next dispatch.`;
+    } catch (e) {
+      return "Job action failed: " + String(e).slice(0, 120);
+    }
+  }
+  if (text === "/storage") {
+    if (!db) return "No database.";
+    try {
+      await ensureTables(db);
+      const total = await db.prepare("SELECT COUNT(*) AS n FROM productions").first();
+      const done = await db.prepare("SELECT COUNT(*) AS n FROM productions WHERE status = 'complete'").first();
+      return (
+        `🗄 Productions: ${total ? total.n : 0} total · ${done ? done.n : 0} complete\n` +
+        `Durable object storage: ${ctx.env.FILES ? "FILES binding present" : "not provisioned — renders only exist in the studio workspace"}`
+      );
+    } catch (e) {
+      return "Storage read failed: " + String(e).slice(0, 120);
     }
   }
   if (text === "/weather") return weatherTextCmd(ctx, settings);
@@ -2074,8 +2247,13 @@ app.all("/telegram", telegramHandler);
 app.post("/acks", async (ctx) => {
   try {
     const raw = await ctx.req.text();
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
+    if (!secret) {
+      if (ctx.env.DB) await ensureTables(ctx.env.DB);
+      return ctx.json(HTTP_UNAVAILABLE, 503);
+    }
     const ok = await verifySignature(
-      raw, ctx.req.header("x-hub-signature-256") || "", ctx.env.HUB_WEBHOOK_SECRET
+      raw, ctx.req.header("x-hub-signature-256") || "", secret
     );
     if (!ok) return ctx.json({ error: "invalid signature" }, 401);
     if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
@@ -2143,8 +2321,7 @@ app.post("/sweep", async (ctx) => {
     let alerts = 0;
     try { alerts = await newsAlerts(ctx); } catch (e) { /* alerts best-effort */ }
     let post = 0;
-    try { post = await newsPost(ctx); } catch (e) { /* post-release best-effort */ }
-    let fails = { found: 0, sent: 0 };
+    try { post = await newsPost(ctx); } catch (e) { /* post-release best-effort */ }    let fails = { found: 0, sent: 0 };
     try { fails = await failureWatch(ctx); } catch (e) { console.error("failureWatch:", e); }
 
     // Self-heal icc-engine: GitHub's scheduled cron misses slots (it went
@@ -2153,7 +2330,9 @@ app.post("/sweep", async (ctx) => {
     let icc = "skipped";
     try {
       const token = ctx.env.HUB_GITHUB_TOKEN;
+
       if (token) {
+
         const j = await ghGet("/repos/landryparadis012-git/icc-engine/actions/runs?per_page=3", token);
         const runs = j.workflow_runs || [];
         const active = runs.some((r) => r.status === "queued" || r.status === "in_progress");
@@ -2189,79 +2368,91 @@ app.post("/ingest", async (ctx) => {
     try { body = JSON.parse(raw); } catch (_) { return ctx.json({ error: "bad json" }, 400); }
     const token = ctx.env.HUB_GITHUB_TOKEN;
 
-    if (body && body.type && !body.repo) {
-      const sigOk = await verifySignature(
-        raw, ctx.req.header("x-hub-signature-256") || "", ctx.env.HUB_WEBHOOK_SECRET
-      );
-      if (!sigOk) return ctx.json({ error: "invalid signature" }, 401);
-      if (!ctx.env.DB) return ctx.json({ status: "ok", event: body.type, stored: false }, 200);
-      await ensureTables(ctx.env.DB);
-      const r = await storeEvent(ctx.env.DB, body);
-      await recordJob(ctx.env.DB, {
-        job_id: body.event_id || `${body.type}:${body.repo || "hub"}`,
-        service: body.repo || "hub",
-        kind: body.type,
-        status: r.stored ? "recorded" : "duplicate",
-        detail: JSON.stringify(body).slice(0, 500),
-      });
-      return ctx.json({ status: "ok", event: body.type, ...r }, 200);
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
+    if (!secret) {
+      if (ctx.env.DB) await ensureTables(ctx.env.DB);
+      return ctx.json(HTTP_UNAVAILABLE, 503);
     }
-
-    if (!token || !body.repo) {
-      return ctx.json({ error: "missing token or repo" }, 400);
-    }
-
-    const seriesName = body.client_payload?.series_name || "";
-    const episode = body.client_payload?.episode || "";
-    const dedupKey = body.repo + ":" + seriesName + ":" + episode;
-
-    if (ctx.env.DB) {
-      try {
-        await ensureTables(ctx.env.DB);
-        const existing = await ctx.env.DB
-          .prepare("SELECT id FROM dispatched WHERE dedup_key = ?")
-          .bind(dedupKey).first();
-
-        if (existing) {
-          return ctx.json({
-            status: "duplicate",
-            message: "Episode already dispatched: " + dedupKey,
-          }, 200);
-        }
-
-        await ctx.env.DB
-          .prepare(
-            "INSERT INTO dispatched (dedup_key, repo, series, episode, dispatched_at) VALUES (?, ?, ?, ?, ?)"
-          )
-          .bind(dedupKey, body.repo, seriesName, episode, new Date().toISOString()).run();
-      } catch (e) {
-        console.error("D1 dedup error:", e);
-      }
-    }
-
-    const success = await dispatchGitHub(token, body.repo, "opshub.produce", body.client_payload);
-    if (ctx.env.DB) {
-      await recordJob(ctx.env.DB, {
-        job_id: `dispatch:${dedupKey}`,
-        service: body.repo,
-        kind: "repository_dispatch",
-        status: success ? "dispatched" : "dispatch_failed",
-        detail: `topic=${seriesName || "-"} episode=${episode || "-"}`,
-        created_at: Math.floor(Date.parse(body.client_payload?.dispatched_at || "") / 1000) || nowSec(),
-      });
-    }
-    return ctx.json({ status: success ? "accepted" : "dispatch_failed", dedup_key: dedupKey }, 200);
+    const sigOk = await verifySignature(
+      raw, ctx.req.header("x-hub-signature-256") || "", secret
+    );
+    if (!sigOk) return ctx.json({ error: "invalid signature" }, 401);
+    if (!ctx.env.DB) return ctx.json({ status: "ok", event: body.type, stored: false }, 200);
+    await ensureTables(ctx.env.DB);
+    const r = await storeEvent(ctx.env.DB, body);
+    await recordJob(ctx.env.DB, {
+      job_id: body.event_id || `${body.type}:${body.repo || "hub"}`,
+      service: body.repo || "hub",
+      kind: body.type,
+      status: r.stored ? "recorded" : "duplicate",
+      detail: JSON.stringify(body).slice(0, 500),
+    });
+    return ctx.json({ status: "ok", event: body.type, ...r }, 200);
   } catch (e) {
     console.error("Ingest error:", e);
     return ctx.json({ error: "internal error" }, 500);
   }
+  if (!token || !body.repo) {
+    return ctx.json({ error: "missing token or repo" }, 400);
+  }
+
+  const seriesName = body.client_payload?.series_name || "";
+  const episode = body.client_payload?.episode || "";
+  const dedupKey = body.repo + ":" + seriesName + ":" + episode;
+
+  if (ctx.env.DB) {
+    try {
+      await ensureTables(ctx.env.DB);
+      const existing = await ctx.env.DB
+        .prepare("SELECT id FROM dispatched WHERE dedup_key = ?")
+        .bind(dedupKey).first();
+
+      if (existing) {
+        return ctx.json({
+          status: "duplicate",
+          message: "Episode already dispatched: " + dedupKey,
+        }, 200);
+      }
+
+      await ctx.env.DB
+        .prepare(
+          "INSERT INTO dispatched (dedup_key, repo, series, episode, dispatched_at) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind(dedupKey, body.repo, seriesName, episode, new Date().toISOString()).run();
+    } catch (e) {
+      console.error("D1 dedup error:", e);
+    }
+  }
+
+  const success = await dispatchGitHub(token, body.repo, "opshub.produce", body.client_payload);
+  if (ctx.env.DB) {
+    await recordJob(ctx.env.DB, {
+      job_id: `dispatch:${dedupKey}`,
+      service: body.repo,
+      kind: "repository_dispatch",
+      status: success ? "dispatched" : "dispatch_failed",
+      detail: `topic=${seriesName || "-"} episode=${episode || "-"}`,
+      created_at: Math.floor(Date.parse(body.client_payload?.dispatched_at || "") / 1000) || nowSec(),
+    });
+  }
+  return ctx.json({ status: success ? "accepted" : "dispatch_failed", dedup_key: dedupKey }, 200);
 });
 
 // ---------------- legacy emit ----------------
 app.post("/emit", async (ctx) => {
   try {
-    const body = await ctx.req.json();
+    const raw = await ctx.req.text();
+    let body;
+    try { body = JSON.parse(raw); } catch (_) { return ctx.json({ error: "bad json" }, 400); }
+
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
     if (body && body.type && !body.repo) {
+      if (!secret) {
+        if (ctx.env.DB) await ensureTables(ctx.env.DB);
+        return ctx.json(HTTP_UNAVAILABLE, 503);
+      }
+      const sigOk = await verifySignature(raw, ctx.req.header("x-hub-signature-256") || "", secret);
+      if (!sigOk) return ctx.json({ error: "invalid signature" }, 401);
       if (ctx.env.DB) {
         await ensureTables(ctx.env.DB);
         const r = await storeEvent(ctx.env.DB, body);
@@ -2269,6 +2460,7 @@ app.post("/emit", async (ctx) => {
       }
       return ctx.json({ status: "accepted", stored: false }, 200);
     }
+
     const token = ctx.env.HUB_GITHUB_TOKEN;
     if (token && body.repo) {
       await dispatchGitHub(token, body.repo, "legacy.produce", body.client_payload);
@@ -2290,6 +2482,32 @@ app.get("/tg-webhook-info", async (ctx) => {
 });
 
 // JSON health snapshot for scripts/dashboards (Telegram /health is the same data).
+// Register this worker's Telegram webhook (the worker calls Telegram
+// directly with its own TELEGRAM_BOT_TOKEN so Telegram can resolve the
+// webhook URL from the same network the worker is reachable on).
+app.post("/set-webhook", async (ctx) => {
+  const tok = (ctx.env.TELEGRAM_BOT_TOKEN || "").trim();
+  if (!tok) return ctx.json({ error: "no bot token configured" }, 500);
+  const secret = (ctx.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+  const url = (ctx.env.HUB_URL || "").trim().replace(/\/?$/, "") + "/telegram";
+  if (!url) return ctx.json({ error: "no HUB_URL configured" }, 500);
+  try {
+    const r = await fetch("https://api.telegram.org/bot" + tok + "/setWebhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "OpsHub" },
+      body: JSON.stringify({
+        url,
+        ...(secret ? { secret_token: secret } : {}),
+        allowed_updates: ["message", "callback_query"],
+      }),
+    });
+    const j = await r.json();
+    return ctx.json({ ok: j && j.ok, result: j && j.result });
+  } catch (e) {
+    return ctx.json({ ok: false, error: String(e).slice(0, 200) }, 502);
+  }
+});
+
 app.get("/health", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
   try {
@@ -2389,6 +2607,20 @@ app.post("/report-tick", async (ctx) => {
   }
 });
 
+app.post("/reminders", async (ctx) => {
+  if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
+  try {
+    await ensureTables(ctx.env.DB);
+    const body = await ctx.req.json();
+    const chatId = body.chat_id || body.chatId;
+    if (!chatId) return ctx.json({ error: "chat_id required" }, 400);
+    const rows = await listReminders(ctx.env.DB, chatId);
+    return ctx.json({ reminders: rows });
+  } catch (e) {
+    return ctx.json({ error: String(e).slice(0, 200) }, 500);
+  }
+});
+
 // First-set is open (registers the report owner); changing needs the secret.
 app.post("/set-owner", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
@@ -2399,7 +2631,10 @@ app.post("/set-owner", async (ctx) => {
     const cur = await kvGet(ctx.env.DB, "report_owner");
     const curChat = cur ? JSON.parse(cur).chat : null;
     const secret = ctx.env.HUB_WEBHOOK_SECRET;
-    const authed = !curChat || (secret && body.secret === secret) || String(body.chat_id) === String(curChat);
+    if (!secret) {
+      return ctx.json(HTTP_UNAVAILABLE, 503);
+    }
+    const authed = !curChat || body.secret === secret || String(body.chat_id) === String(curChat);
     if (!authed) return ctx.json({ error: "owner already set — pass secret to change" }, 403);
     await kvSet(ctx.env.DB, "report_owner", { chat: String(body.chat_id), setAt: Date.now() });
     return ctx.json({ status: "ok", owner: String(body.chat_id) });
@@ -2411,13 +2646,17 @@ app.post("/set-owner", async (ctx) => {
 // HTTP read endpoints expose reminder texts — require the webhook secret.
 function isAdmin(ctx) {
   const secret = ctx.env.HUB_WEBHOOK_SECRET;
-  if (!secret) return true;
+  if (!secret) {
+    return false;
+  }
   return ctx.req.query("secret") === secret;
 }
 
 app.get("/reminders", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
-  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 403);
+  if (!isAdmin(ctx)) {
+    return ctx.json({ error: "hub misconfigured" }, 503);
+  }
   try {
     await ensureTables(ctx.env.DB);
     const chatId = ctx.req.query("chat_id") || "0";
@@ -2429,7 +2668,11 @@ app.get("/reminders", async (ctx) => {
 
 app.get("/settings", async (ctx) => {
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
-  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 403);
+  const ok = isAdmin(ctx);
+  if (ok === false) {
+    return ctx.json({ error: "hub misconfigured" }, 503);
+  }
+  if (ok !== true) return ctx.json({ error: "bad secret" }, 403);
   const s = await getSettings(ctx.env.DB);
   const p = localParts(new Date(), s.tz);
   return ctx.json({ settings: s, local_time: p.hhmm });
@@ -2473,6 +2716,17 @@ app.post("/debug-ai", async (ctx) => {
     return ctx.json({ error: e.message }, 500);
   }
 });
+
+registerProductionRoutes(app, {
+  ensureTables,
+  recordJob,
+  verifySignature,
+  dispatchGitHub,
+  HTTP_UNAVAILABLE,
+});
+
+// Signed R2 object storage (upload / read / list / delete).
+registerFileRoutes(app, { verifySignature, HTTP_UNAVAILABLE });
 
 export default app;
 

@@ -3,12 +3,19 @@
   "compatibility_date": "2026-10-01",
   "main": "worker/index.js",
   "vars": {
-    "GITHUB_OWNER": "landryparadis012-git"
+    "GITHUB_OWNER": "landryparadis012-git",
+    "FILES_BUCKET": "files"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_id": ""
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "files"
     }
   ]
 }

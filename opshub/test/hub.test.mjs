@@ -101,6 +101,26 @@ describe("ingest: HMAC + idempotency + job ledger", () => {
     assert.equal(res.status, 401);
   });
 
+  test("ingest rejects unsigned events when the hub has no webhook secret configured", async () => {
+    const { env, sqlite } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    const res = await post("/ingest", { type: "flip.deal_found", event_id: "no-secret" }, env);
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: "hub misconfigured" });
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM events").get().n, 0);
+  });
+
+  test("emit rejects a valid-looking event sent to an unconfigured hub", async () => {
+    const { env, sqlite } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    const res = await app.request("/emit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "studio.produce", event_id: "emit-no-secret" }),
+    }, env);
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: "hub misconfigured" });
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM events").get().n, 0);
+  });
+
   test("accepts a valid signature and records the event + job", async () => {
     const { env, sqlite } = makeEnv();
     const raw = JSON.stringify({ type: "trade.opened", event_id: "e1", repo: undefined });
@@ -140,9 +160,60 @@ describe("ingest: HMAC + idempotency + job ledger", () => {
     assert.equal(await verifySignature(raw, sign(raw), SECRET), true);
     assert.equal(await verifySignature(raw, sign(raw), "other-secret"), false);
     assert.equal(await verifySignature(raw, "sha256=dead", SECRET), false);
-    assert.equal(await verifySignature(raw, "", ""), true, "unset secret = open (matches /ingest)");
+    assert.equal(
+      await verifySignature(raw, "", ""),
+      false,
+      "missing secret must fail closed (hub rejects unsigned events)"
+    );
+    assert.equal(
+      await verifySignature(raw, sign(raw), ""),
+      false,
+      "request with a correct signature but no configured secret must also fail closed"
+    );
+  });  });
+
+// ==========================================================================
+describe("ingest: unsigned events are rejected when the secret is missing", () => {
+  test("ingest rejects unsigned events when the hub has no webhook secret configured", async () => {
+    const { env, sqlite } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    const res = await post("/ingest", { type: "flip.deal_found", event_id: "no-secret" }, env);
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: "hub misconfigured" });
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM events").get().n, 0);
   });
-});
+
+  test("emit rejects a valid-looking event sent to an unconfigured hub", async () => {
+    const { env, sqlite } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    const res = await app.request("/emit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "studio.produce", event_id: "emit-no-secret" }),
+    }, env);
+    assert.equal(res.status, 503);
+    assert.deepEqual(await res.json(), { error: "hub misconfigured" });
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM events").get().n, 0);
+  });
+
+  test("acks rejects an unsigned request when the hub has no webhook secret", async () => {
+    const { env } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    assert.equal((await post("/acks", { op: "list" }, env)).status, 503);
+  });
+
+  test("isAdmin-protected reads fail closed when the secret is missing", async () => {
+    const { env } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    assert.equal((await get("/reminders", env)).status, 503);
+    assert.equal((await get("/settings", env)).status, 503);
+  });
+
+  test("set-owner rejects no-secret attempts before any owner is registered", async () => {
+    const { env } = makeEnv({ HUB_WEBHOOK_SECRET: "" });
+    const res = await app.request("/set-owner", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: 123 }),
+    }, env);
+    assert.equal(res.status, 503);
+  });
 
 // ==========================================================================
 describe("telegram button acks -> /acks relay", () => {
@@ -355,7 +426,7 @@ describe("failure triage (diagnosis engine)", () => {
   test("log evidence is size-capped so Telegram never truncates mid-word", () => {
     const big = Array.from({ length: 5000 }, (_, i) => `noise ${i} with some padding text`).join("\n");
     assert.ok(extractEvidence(big).length <= 2500);
-  });
+  });  });
 });
 
 // ==========================================================================
