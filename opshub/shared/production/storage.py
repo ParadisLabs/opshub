@@ -66,7 +66,10 @@ def upload_artifacts(job_id: str, result: Dict[str, Any], *,
             body = f.read()
         digest = hashlib.sha256(body).hexdigest()
         name = os.path.basename(path)
-        key = f"jobs/{urllib.parse.quote(job_id, safe='')}/{item['kind']}/{urllib.parse.quote(name, safe='')}"
+        # The Worker signs the decoded R2 key, so sign the raw key and only
+        # percent-encode the URL. This keeps spaces/non-ASCII filenames valid.
+        key = f"jobs/{job_id}/{item['kind']}/{name}"
+        url_key = urllib.parse.quote(key, safe="/")
         canonical = f"POST\n{key}\n{digest}".encode()
         signature = "sha256=" + hmac.new(secret.encode(), canonical, hashlib.sha256).hexdigest()
         headers = {
@@ -75,7 +78,7 @@ def upload_artifacts(job_id: str, result: Dict[str, Any], *,
             "user-agent": "studio-artifact-upload/1.0",
         }
         try:
-            status, text = fn("POST", hub + "/files/" + key, headers, body)
+            status, text = fn("POST", hub + "/files/" + url_key, headers, body)
             if 200 <= int(status) < 300:
                 uploaded.append({"key": key, "sha256": digest, "bytes": len(body)})
             else:

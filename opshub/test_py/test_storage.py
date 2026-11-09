@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,12 +49,34 @@ class UploadTests(unittest.TestCase):
             self.assertIn("/subtitles/episode.srt", kinds)
             self.assertIn("/manifest/manifest.json", kinds)
             for method, url, headers, body in calls:
-                key = url.split("/files/", 1)[1]
+                # The Worker decodes the URL path before verifying the HMAC.
+                key = urllib.parse.unquote(url.split("/files/", 1)[1])
                 expected = "sha256=" + hmac.new(
                     b"s3cret", f"POST\n{key}\n{hashlib.sha256(body).hexdigest()}".encode(),
                     hashlib.sha256).hexdigest()
                 self.assertEqual(headers["x-hub-signature-256"], expected)
             self.assertEqual(out["errors"], [])
+
+    def test_signs_decoded_key_for_spaced_filename(self):
+        calls = []
+        def transport(method, url, headers, body):
+            calls.append((url, headers, body))
+            return 200, "{}"
+        with tempfile.TemporaryDirectory() as d:
+            video = os.path.join(d, "episode one.mp4")
+            Path(video).write_bytes(b"mp4")
+            out = upload_artifacts(
+                "job-1", {"artifacts": [{"type": "video", "path": video}]},
+                env={"HUB_URL": "https://hub.example", "HUB_WEBHOOK_SECRET": "s3cret"},
+                transport=transport)
+            self.assertEqual(out["errors"], [])
+            url, headers, body = calls[0]
+            self.assertIn("episode%20one.mp4", url)
+            key = urllib.parse.unquote(url.split("/files/", 1)[1])
+            expected = "sha256=" + hmac.new(
+                b"s3cret", f"POST\n{key}\n{hashlib.sha256(body).hexdigest()}".encode(),
+                hashlib.sha256).hexdigest()
+            self.assertEqual(headers["x-hub-signature-256"], expected)
 
     def test_failed_upload_is_reported_not_raised(self):
         with tempfile.TemporaryDirectory() as d:
