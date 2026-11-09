@@ -27,6 +27,7 @@
 
 import { Hono } from "hono";
 import {
+  STUDIO_REPO,
   TERMINAL_JOBS,
   canonStudio,
   createProduction,
@@ -48,6 +49,28 @@ const REPOS = [
   { name: "icc-engine", event: "icc.run" },
 ];
 const REPO_NAMES = REPOS.map((r) => r.name);
+
+// One authoritative dispatch contract for Telegram, the Worker and Convex.
+// A null repo is an explicit, visible "not connected" target, never a fake dispatch.
+const DISPATCH_TARGETS = {
+  trendscope: { label: "TrendScope", repo: "faceless-studio", event: "opshub.produce", studio: true, language: "en" },
+  "true-crime": { label: "True Crime", repo: "faceless-turkce-studio", event: "opshub.produce", studio: true, language: "tr" },
+  "deep-history": { label: "Deep History", repo: "deep-history-studio", event: "opshub.produce", studio: true, language: "en" },
+  icc: { label: "ICC (shadow/paper only)", repo: "icc-engine", event: "icc.run", studio: false },
+  flip: { label: "Business Flip (discovery only)", repo: "business-flip-", event: "opshub.flip", studio: false },
+  benji: { label: "Free Benji", repo: null, event: null, studio: false, unavailable: "no Free Benji repository or workflow is connected" },
+};
+const TARGET_ALIASES = {
+  english: "trendscope", trend: "trendscope", faceless: "trendscope",
+  turkce: "true-crime", turkish: "true-crime", truecrime: "true-crime", "true_crime": "true-crime",
+  history: "deep-history", deep_history: "deep-history", deephistory: "deep-history",
+  business: "flip", "business-flip": "flip", dealbridge: "flip",
+};
+function canonTarget(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  const key = TARGET_ALIASES[raw] || raw;
+  return Object.prototype.hasOwnProperty.call(DISPATCH_TARGETS, key) ? key : null;
+}
 const REPORT_TTL_S = 900;
 const WEATHER_TTL_S = 21600;
 const FF_TTL_S = 21600;
@@ -100,6 +123,23 @@ app.get("/dashboard", async (ctx) => {
   });
 });
 
+// Public, sanitized read-only feed for the dashboard. Full job records stay
+// behind the signed /jobs API; no output paths, details or secrets are exposed.
+app.get("/dashboard/data", async (ctx) => {
+  if (!ctx.env.DB) return ctx.json({ jobs: [] });
+  try {
+    await ensureTables(ctx.env.DB);
+    const rows = await ctx.env.DB
+      .prepare("SELECT studio, status, stage, progress, updated_at FROM productions ORDER BY updated_at DESC LIMIT 50")
+      .all();
+    return new Response(JSON.stringify({ jobs: rows.results || [] }), {
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+    });
+  } catch (e) {
+    return ctx.json({ error: "dashboard unavailable" }, 500);
+  }
+});
+
 // ---------------- helpers ----------------
 async function sendTelegram(botToken, chatId, text) {
   try {
@@ -136,20 +176,42 @@ async function ghGet(path, token) {
   return r.json();
 }
 
-async function dispatchGitHub(token, repo, eventType, payload) {
-  const resp = await fetch(
-    "https://api.github.com/repos/landryparadis012-git/" + repo + "/dispatches",
-    {
-      method: "POST",
-      headers: {
-        Authorization: "token " + token,
-        Accept: "application/vnd.github+json",
-        "User-Agent": "OpsHub",
-      },
-      body: JSON.stringify({ event_type: eventType, client_payload: payload || {} }),
+function errorName(e) {
+  return e && e.name ? e.name : "network error";
+}
+
+async function dispatchGitHubDetailed(token, repo, eventType, payload) {
+  let last = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const resp = await fetch(
+        "https://api.github.com/repos/landryparadis012-git/" + repo + "/dispatches",
+        {
+          method: "POST",
+          headers: {
+            Authorization: "token " + token,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "OpsHub",
+          },
+          body: JSON.stringify({ event_type: eventType, client_payload: payload || {} }),
+        }
+      );
+      if (resp.ok) return { ok: true, status: resp.status, attempts: attempt };
+      last = "HTTP " + resp.status;
+      // Auth/validation errors are not retryable; 5xx and 429 are.
+      if (resp.status < 500 && resp.status !== 429) {
+        return { ok: false, status: resp.status, error: last, attempts: attempt };
+      }
+    } catch (e) {
+      last = errorName(e);
     }
-  );
-  return resp.ok;
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+  }
+  return { ok: false, error: last || "dispatch failed", attempts: 3 };
+}
+
+async function dispatchGitHub(token, repo, eventType, payload) {
+  return (await dispatchGitHubDetailed(token, repo, eventType, payload)).ok;
 }
 
 async function callGroq(groqKey, messages) {
@@ -307,6 +369,23 @@ function fmtDayClock(epoch, tz) {
 }
 
 // ---------------- HMAC (events from studios / icc-engine) ----------------
+function telegramChatAllowed(env, chatId) {
+  const allowed = String((env && env.TELEGRAM_CHAT_ID) || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!allowed.length) return true; // development only; production is rejected below
+  return allowed.includes(String(chatId));
+}
+
+// Production may never run an open webhook or an unallowlisted chat.
+function telegramProductionError(env) {
+  const production = String((env && env.ENVIRONMENT) || "").trim().toLowerCase() === "production";
+  if (!production) return null;
+  const required = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "TELEGRAM_CHAT_ID"];
+  return required.filter((k) => !String((env && env[k]) || "").trim());
+}
+
 async function verifySignature(rawBody, header, secret) {
   if (!secret) return false;
   if (!header) return false;
@@ -1879,44 +1958,83 @@ async function handleCommand(text, chatId, ctx, settings) {
   }
   if (/^\/run\b/.test(text)) {
     const arg = (text.split(/\s+/)[1] || "").toLowerCase();
-    const targets =
-      arg === "all"
-        ? ["trendscope", "true-crime", "deep-history"]
-        : [canonStudio(arg)].filter(Boolean);
-    if (!targets.length) return "Usage: /run english | /run turkce | /run history | /run all";
+    const requested = arg === "all"
+      ? Object.keys(DISPATCH_TARGETS)
+      : [canonTarget(arg)].filter(Boolean);
+    if (!requested.length) {
+      return "Usage: /run trendscope | /run truecrime | /run history | /run icc | /run flip | /run benji | /run all";
+    }
     const token = ctx.env.HUB_GITHUB_TOKEN;
     if (!token) return "Cannot dispatch: HUB_GITHUB_TOKEN is not configured on the hub.";
     const lines = [];
-    for (const studio of targets) {
-      const jobId = `${studio}-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 8)}`;
+    for (const target of requested) {
+      const spec = DISPATCH_TARGETS[target];
+      if (!spec.repo || !spec.event) {
+        lines.push(`${target}: unavailable — ${spec.unavailable}`);
+        continue;
+      }
       try {
         await ensureTables(db);
-        await createProduction(db, {
-          job_id: jobId, studio, status: "dispatched", stage: "research",
-          detail: "telegram /run", production_mode: "test",
-        });
-        const ok = await dispatchGitHub(token, STUDIO_REPO[studio], "opshub.produce", {
-          schema_version: "1.0", event: "opshub.produce", job_id: jobId, studio,
-          topic: "", language: studio === "true-crime" ? "tr" : "en",
-          format: "short", requested_by: "telegram", production_mode: "test",
-          approval_required: true,
-        });
+        const cutoff = Math.floor(Date.now() / 1000) - 600;
+        let active = null;
+        if (spec.studio) {
+          active = await db.prepare(
+            "SELECT job_id FROM productions WHERE studio = ? AND status IN ('dispatched','accepted','running','quality_review','awaiting_approval') AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
+          ).bind(target, cutoff).first();
+        } else {
+          active = await db.prepare(
+            "SELECT job_id FROM jobs WHERE service = ? AND kind = 'repository_dispatch' AND status = 'dispatched' AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
+          ).bind(spec.repo, cutoff).first();
+        }
+        if (active && active.job_id) {
+          lines.push(`${target}: deduplicated (${active.job_id} already active)`);
+          continue;
+        }
+        const jobId = `${target}-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 8)}`;
+        if (spec.studio) {
+          await createProduction(db, {
+            job_id: jobId, studio: target, status: "dispatched", stage: "research",
+            detail: "telegram /run", production_mode: "test",
+          });
+        }
+        const payload = spec.studio ? {
+          schema_version: "1.0", event: spec.event, job_id: jobId, studio: target,
+          topic: "", language: spec.language, format: "short", requested_by: "telegram",
+          production_mode: "test", approval_required: true,
+        } : {
+          schema_version: "1.0", event: spec.event, job_id: jobId, source: "opshub",
+          requested_by: "telegram", production_mode: "test", approval_required: true,
+          ...(target === "icc" ? { shadow: true, paper_only: true } : { discovery_only: true }),
+        };
+        const result = await dispatchGitHubDetailed(token, spec.repo, spec.event, payload);
         await recordJob(db, {
-          job_id: `dispatch:${jobId}`, service: STUDIO_REPO[studio],
-          kind: "repository_dispatch", status: ok ? "dispatched" : "dispatch_failed",
-          detail: jobId,
+          job_id: `dispatch:${jobId}`, service: spec.repo,
+          kind: "repository_dispatch", status: result.ok ? "dispatched" : "dispatch_failed",
+          detail: `${target}: ${result.error || ("HTTP " + result.status)} job=${jobId}`,
         });
-        lines.push(`${studio}: ${ok ? "dispatched (not a production yet)" : "dispatch FAILED"}`);
+        if (spec.studio && !result.ok) {
+          await updateProduction(db, jobId, { status: "failed", detail: `dispatch failed: ${result.error || result.status}` });
+        }
+        lines.push(`${target}: ${result.ok ? `dispatched ${jobId} (not a production yet)` : `dispatch FAILED (${result.error || result.status})`}`);
       } catch (e) {
-        lines.push(`${studio}: dispatch error ${String(e).slice(0, 60)}`);
+        lines.push(`${target}: dispatch error ${String(e).slice(0, 80)}`);
       }
     }
-    return lines.join("\n") + "\nTracking: /jobs";
+    const queued = lines.filter((line) => /dispatched|deduplicated/.test(line)).length;
+    return lines.join("\n") + `\nQueued ${queued}/${requested.length}. Tracking: /jobs`;
   }
   if (/^\/(approve|cancel|retry)\b/.test(text)) {
     const parts = text.split(/\s+/);
     const verb = parts[0].slice(1);
-    const id = parts[1];
+    let id = parts[1];
+    if (!id && verb === "cancel" && db) {
+      try {
+        const active = await db.prepare(
+          "SELECT job_id FROM productions WHERE status NOT IN ('complete','cancelled','failed') ORDER BY updated_at DESC LIMIT 1"
+        ).first();
+        id = active && active.job_id;
+      } catch (e) { id = null; }
+    }
     if (!id) return `Usage: /${verb} JOB_ID`;
     if (!db) return "No database.";
     try {
@@ -1926,6 +2044,13 @@ async function handleCommand(text, chatId, ctx, settings) {
       if (verb === "approve") {
         if (!["quality_review", "awaiting_approval"].includes(job.status))
           return `Cannot approve ${id} while ${job.status}.`;
+        const qa = job.qa || {};
+        if (qa.verdict !== "pass" || (Array.isArray(qa.blocking_failures) && qa.blocking_failures.length)) {
+          return `Cannot approve ${id}: QA is ${qa.verdict || "missing"}. An empty or blocked QA cannot pass.`;
+        }
+        if (qa.synthetic === true || qa.publishable === false) {
+          return `Cannot approve ${id}: this is a synthetic fixture, not publishable editorial content.`;
+        }
         await updateProduction(db, id, {
           status: "approved", approved_at: nowSec(), detail: "approved from Telegram",
         });
@@ -2061,6 +2186,8 @@ Commands:
 /where <place> — move OpsHub with you (time, weather, alerts shift)
 /tz <IANA> — set timezone · /time [place] — what time is it there
 /health · /jobs · /repos · /status · /forget <chain>
+/run trendscope | truecrime | history | icc | flip | benji | all
+/cancel <job-id> · /approve <job-id> · /retry <job-id>
 
 Or just talk to me: "I'm in Turkey now", "remind me every day at 08:00",
 "delete it", "any news before I trade?", "how do I get to Limassol?"`;
@@ -2081,11 +2208,26 @@ function abort2(ms) {
 // x-telegram-bot-api-secret-token), older setups used /_telegram.
 const telegramHandler = async (ctx) => {
   try {
+    const missing = telegramProductionError(ctx.env);
+    if (missing) {
+      console.error("Telegram webhook refused: production auth missing", missing.join(","));
+      return ctx.json({ error: "telegram not configured", missing }, 503);
+    }
     const ws = ctx.env.TELEGRAM_WEBHOOK_SECRET;
     if (ws && ctx.req.header("x-telegram-bot-api-secret-token") !== ws) {
       return ctx.json({ error: "forbidden" }, 403);
     }
     const update = await ctx.req.json();
+    const incomingChat =
+      (update.message && update.message.chat && update.message.chat.id) ??
+      (update.callback_query && update.callback_query.message &&
+        update.callback_query.message.chat && update.callback_query.message.chat.id);
+    if (incomingChat == null) {
+      return ctx.json({ error: "unsupported update" }, 400);
+    }
+    if (!telegramChatAllowed(ctx.env, incomingChat)) {
+      return ctx.json({ error: "forbidden" }, 403);
+    }
     const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
     const db = ctx.env.DB;
     const settings = db ? await getSettings(db) : { ...DEFAULT_SETTINGS };
@@ -2476,6 +2618,7 @@ app.post("/emit", async (ctx) => {
 // Telegram's getWebhookInfo (no token echoed back) is the only way to see
 // where updates are actually landing and why presses might go missing.
 app.get("/tg-webhook-info", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 401);
   if (!(ctx.env.TELEGRAM_BOT_TOKEN || "").trim()) return ctx.json({ error: "no bot token configured" }, 500);
   const info = await webhookHealth(ctx);
   return info ? ctx.json({ ok: true, result: info }) : ctx.json({ error: "telegram unreachable" }, 502);
@@ -2486,23 +2629,34 @@ app.get("/tg-webhook-info", async (ctx) => {
 // directly with its own TELEGRAM_BOT_TOKEN so Telegram can resolve the
 // webhook URL from the same network the worker is reachable on).
 app.post("/set-webhook", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 401);
   const tok = (ctx.env.TELEGRAM_BOT_TOKEN || "").trim();
   if (!tok) return ctx.json({ error: "no bot token configured" }, 500);
   const secret = (ctx.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
-  const url = (ctx.env.HUB_URL || "").trim().replace(/\/?$/, "") + "/telegram";
-  if (!url) return ctx.json({ error: "no HUB_URL configured" }, 500);
+  if (!secret) return ctx.json({ error: "TELEGRAM_WEBHOOK_SECRET missing" }, 500);
+  const base = (ctx.env.HUB_URL || "").trim().replace(/\/?$/, "");
+  if (!base) return ctx.json({ error: "no HUB_URL configured" }, 500);
+  let origin;
+  try { origin = new URL(base); } catch (e) { return ctx.json({ error: "invalid HUB_URL" }, 500); }
+  if (origin.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(origin.hostname)) {
+    return ctx.json({ error: "HUB_URL must be https" }, 400);
+  }
+  const url = base + "/telegram";
   try {
     const r = await fetch("https://api.telegram.org/bot" + tok + "/setWebhook", {
       method: "POST",
       headers: { "Content-Type": "application/json", "User-Agent": "OpsHub" },
       body: JSON.stringify({
         url,
-        ...(secret ? { secret_token: secret } : {}),
+        secret_token: secret,
         allowed_updates: ["message", "callback_query"],
       }),
     });
-    const j = await r.json();
-    return ctx.json({ ok: j && j.ok, result: j && j.result });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j || j.ok !== true) {
+      return ctx.json({ ok: false, error: (j && j.description) || ("telegram HTTP " + r.status) }, 502);
+    }
+    return ctx.json({ ok: true, result: { url, allowed_updates: ["message", "callback_query"] } });
   } catch (e) {
     return ctx.json({ ok: false, error: String(e).slice(0, 200) }, 502);
   }
@@ -2680,6 +2834,7 @@ app.get("/settings", async (ctx) => {
 
 // ---------------- debug/admin ----------------
 app.post("/debug-dispatch", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 401);
   try {
     const body = await ctx.req.json();
     const repo = body.repo || "faceless-studio";
@@ -2693,6 +2848,7 @@ app.post("/debug-dispatch", async (ctx) => {
 });
 
 app.get("/init-db", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 401);
   if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
   try {
     await ensureTables(ctx.env.DB);
@@ -2703,6 +2859,7 @@ app.get("/init-db", async (ctx) => {
 });
 
 app.post("/debug-ai", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 401);
   try {
     const body = await ctx.req.json();
     const groqKey = ctx.env.GROQ_API_KEY;
@@ -2727,6 +2884,45 @@ registerProductionRoutes(app, {
 
 // Signed R2 object storage (upload / read / list / delete).
 registerFileRoutes(app, { verifySignature, HTTP_UNAVAILABLE });
+
+// Manual, admin-only retention. Dry-run by default; approved jobs are preserved.
+app.post("/retention/run", async (ctx) => {
+  if (!isAdmin(ctx)) return ctx.json({ error: "bad secret" }, 401);
+  if (!ctx.env.FILES) return ctx.json({ error: "FILES binding not configured" }, 503);
+  let body = {};
+  try { body = await ctx.req.json(); } catch (e) { body = {}; }
+  const days = Math.max(1, Number(body.days || ctx.env.RETENTION_DAYS || 90));
+  const dryRun = body.dry_run !== false;
+  const cutoff = Date.now() - days * 86400000;
+  const approved = new Set();
+  if (ctx.env.DB) {
+    try {
+      await ensureTables(ctx.env.DB);
+      const rows = await ctx.env.DB.prepare("SELECT job_id FROM productions WHERE status = 'approved'").all();
+      for (const row of rows.results || []) approved.add(String(row.job_id));
+    } catch (e) { /* approval lookup is best-effort; dry-run still safe */ }
+  }
+  let cursor;
+  let scanned = 0, deleted = 0, kept = 0;
+  try {
+    do {
+      const page = await ctx.env.FILES.list({ prefix: "jobs/", cursor, limit: 1000 });
+      for (const obj of page.objects || []) {
+        scanned += 1;
+        const jobId = String(obj.key).split("/")[1] || "";
+        const uploaded = obj.uploaded ? new Date(obj.uploaded).getTime() : 0;
+        const expired = uploaded > 0 && uploaded < cutoff;
+        if (!expired || approved.has(jobId)) { kept += 1; continue; }
+        if (!dryRun) await ctx.env.FILES.delete(obj.key);
+        deleted += 1;
+      }
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+    return ctx.json({ dry_run: dryRun, days, scanned, deleted, kept, approved_preserved: approved.size });
+  } catch (e) {
+    return ctx.json({ error: "retention failed: " + String(e).slice(0, 160) }, 500);
+  }
+});
 
 export default app;
 

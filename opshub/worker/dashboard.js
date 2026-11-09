@@ -252,7 +252,7 @@ export function dashboardHtml(version = "3.3.0") {
       banner.textContent = "Cannot reach the hub API: " + e.message;
     });
 
-    getJson("/jobs?limit=50").then(function (d) {
+    getJson("/dashboard/data").then(function (d) {
       var jobs = d.jobs || [];
       renderStudios(jobs);
       renderJobs(jobs);

@@ -39,8 +39,18 @@ if (cfg) {
   else fail("worker entry", cfg.main || "missing");
 
   const d1 = (cfg.d1_databases || [])[0];
-  if (d1 && d1.binding) pass("D1 binding", d1.binding);
-  else fail("D1 binding", "no d1_databases entry");
+  if (d1 && d1.binding) {
+    pass("D1 binding", d1.binding);
+    if (!String(d1.database_id || "").trim()) {
+      if (String(process.env.D1_DATABASE_ID || "").trim()) {
+        pass("D1 database id", "injected from D1_DATABASE_ID at deploy time");
+      } else {
+        fail("D1 database id", "empty in wrangler.jsonc and D1_DATABASE_ID is not set");
+      }
+    } else {
+      pass("D1 database id", "configured");
+    }
+  } else fail("D1 binding", "no d1_databases entry");
 
   const r2 = (cfg.r2_buckets || [])[0];
   if (r2 && r2.binding) {

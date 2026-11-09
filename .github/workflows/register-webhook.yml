@@ -1,15 +1,23 @@
 name: Register Telegram webhook
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   register:
     runs-on: ubuntu-latest
     steps:
-      - name: setWebhook
-        run: |
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/setWebhook" \
-            -d "url=${{ secrets.HUB_URL }}/telegram" \
-            -d "secret_token=${{ secrets.TELEGRAM_WEBHOOK_SECRET }}" \
-            -d "allowed_updates=[\"message\",\"callback_query\"]"
-          echo
-          curl -s "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/getWebhookInfo"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Validate and register webhook
+        working-directory: opshub
+        run: node scripts/register-webhook.mjs
+        env:
+          HUB_URL: ${{ secrets.HUB_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

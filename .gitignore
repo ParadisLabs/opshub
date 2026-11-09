@@ -16,5 +16,9 @@ __pycache__/
 # logs
 *.log
 
+# local toolchain and rendered artifacts (never commit media or binaries)
+.tools/
+artifacts/
+
 # third-party clone kept locally only
 OpenTerminal/

@@ -37,21 +37,27 @@ Set each with `wrangler secret put <NAME>` from `opshub/` (or Sites → Secrets)
 | Secret | Purpose | Where it is set |
 | --- | --- | --- |
 | `HUB_WEBHOOK_SECRET` | HMAC key for `/jobs*`, `/dispatch`, `/files*` | Worker + GitHub repo secret |
-| `TELEGRAM_BOT_TOKEN` | `/approve` `/cancel` `/status` commands and alerts | Worker (optional for dispatch-only) |
-| `TELEGRAM_CHAT_ID` | chat allowed to approve | Worker |
+| `TELEGRAM_BOT_TOKEN` | `/approve` `/cancel` `/status` commands and alerts | Worker |
+| `TELEGRAM_WEBHOOK_SECRET` | `x-telegram-bot-api-secret-token` verification | Worker + GitHub |
+| `TELEGRAM_CHAT_ID` | the only chat allowed to command the hub | Worker + GitHub |
 | `HUB_GITHUB_TOKEN` | repository_dispatch to the studios (repo scope) | Worker |
 | `CLOUDFLARE_API_TOKEN` | deploy, D1/R2 provisioning | your shell only |
 | `CLOUDFLARE_ACCOUNT_ID` | same | your shell only |
 | `GROQ_API_KEY`, `GEMINI_API_KEY` | studios (not the hub) | studio repos |
 | `HUB_URL` | hub origin the studios report to | studio GitHub secrets |
+| `D1_DATABASE_ID` | deploy-time injection; never committed | deploy environment |
+| `R2_BUCKET_NAME` | R2 bucket for renders/manifests (default `files`) | deploy environment |
+| `RETENTION_DAYS` | manual retention window (default 90); approved jobs preserved | Worker var/secret |
 
 Repository variables already in `wrangler.jsonc`: `GITHUB_OWNER`, `FILES_BUCKET`.
 
 ## 3. Provision storage
 
 ```bash
-# D1 (skip if the database id in wrangler.jsonc already exists)
+# D1 — create once, then export the real id. The committed config intentionally
+# has an empty database_id; no resource id is invented or checked in.
 npx wrangler@4 d1 create opshub
+export D1_DATABASE_ID="<the id printed by d1 create or d1 list>"
 
 # R2 — idempotent, fails closed without credentials
 cd opshub && npm run provision:r2 && cd ..
@@ -72,9 +78,15 @@ Expected: `dispatched, events, jobs, kv, productions, reminders, tgacks` plus
 
 ```bash
 cd opshub
-npm run preflight
-npm run deploy
+npm run preflight                       # must be 0 FAIL; requires D1_DATABASE_ID in env
+npm run deploy:worker:dry               # build/validate only
+# Only after explicit authorization:
+npm run deploy:worker
 ```
+
+`npm run deploy:worker` injects `D1_DATABASE_ID` and `R2_BUCKET_NAME` into a
+temporary config and never prints credentials. The Convex backend is deployed by
+`.github/workflows/deploy.yml`; the Worker and Convex are separate deployments.
 
 Then verify against the deployed origin (`HUB` below):
 
@@ -88,7 +100,16 @@ curl -s -o /dev/null -w '%{http_code}\n' $HUB/dashboard  # 200 html
 Unsigned `/jobs` returning 401 is the correct result; a 200 would mean the
 secret is missing and the hub is open.
 
-## 5. Wire the studios
+## 5. Register and verify the Telegram webhook
+
+Run **Actions → Register Telegram webhook** with the four repository secrets
+set (`HUB_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`,
+`TELEGRAM_CHAT_ID`). The script checks DNS, the hub `/health` response,
+Telegram's `ok=true`, and `getWebhookInfo` URL/allowed updates; it exits non-zero
+on any mismatch. Production additionally refuses to process updates when any of
+the three Telegram auth names is missing.
+
+## 6. Wire the studios
 
 In each of `faceless-studio` (trendscope), `faceless-turkce-studio` (true-crime),
 `deep-history-studio` (deep-history) set repo secrets `HUB_URL` and
@@ -104,7 +125,7 @@ Steps `report start`, `report completion` and `report failure` call
 `python job_report.py … || true`, so reporting can never abort a render, and a
 manual run without `OPSHUB_JOB_ID` is a no-op.
 
-## 6. Smoke test (one studio, one real job)
+## 7. Smoke test (one studio, one real job)
 
 ```bash
 BODY='{"schema_version":"1.0","job_id":"smoke-1","studio":"trendscope","topic":"smoke"}'
@@ -118,6 +139,13 @@ curl -s -X POST $HUB/dispatch -H 'content-type: application/json' \
 Expect `{"status":"accepted","created":true,...}` and a `202`-style dispatch
 receipt. **A dispatch only means GitHub accepted the request**; watch the
 Actions run and the dashboard job row before calling it done.
+
+The studio workflow now reports its real QA payload (`report_production.py`)
+using the hub-issued `OPSHUB_JOB_ID`, and uploads the MP4/SRT/thumbnail/manifest
+to signed `/files/jobs/<job_id>/...` when `HUB_URL` and `HUB_WEBHOOK_SECRET`
+are present. Manual retention is admin-only and dry-run by default:
+`POST /retention/run?secret=...` with `{"days":90,"dry_run":true}`; approved jobs
+are never deleted.
 
 ## 7. R2 object round trip
 

@@ -92,6 +92,8 @@ const READINESS_PROVIDERS = [
   ["gemini", ["GEMINI_API_KEY"]],
   ["cloudflare-ai", ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]],
   ["pixabay", ["PIXABAY_API_KEY"]],
+  ["wikimedia", []],
+  ["internet-archive", []],
   ["wikipedia", []],
   ["youtube", ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN"]],
   ["tiktok", ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_REFRESH_TOKEN"]],
@@ -99,8 +101,20 @@ const READINESS_PROVIDERS = [
   ["opshub", ["HUB_URL", "HUB_WEBHOOK_SECRET"]],
 ];
 
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 export function registerProductionRoutes(app, deps) {
   const { ensureTables, recordJob, verifySignature, dispatchGitHub, HTTP_UNAVAILABLE } = deps;
+
+  // Read routes are signed over GET + path + sha256(empty body); the detail
+  // fields (output paths, if any) must not be public.
+  async function readSignedGet(ctx, key) {
+    const secret = ctx.env.HUB_WEBHOOK_SECRET;
+    if (!secret) return ctx.json(HTTP_UNAVAILABLE, 503);
+    const canonical = `GET\n${key}\n${EMPTY_SHA256}`;
+    const ok = await verifySignature(canonical, ctx.req.header("x-hub-signature-256") || "", secret);
+    return ok ? null : ctx.json({ error: "invalid signature" }, 401);
+  }
 
   async function readSigned(ctx) {
     const raw = await ctx.req.text();
@@ -117,6 +131,8 @@ export function registerProductionRoutes(app, deps) {
 
   app.get("/jobs", async (ctx) => {
     if (!ctx.env.DB) return ctx.json({ jobs: [] });
+    const auth = await readSignedGet(ctx, "/jobs");
+    if (auth) return auth;
     try {
       await ensureTables(ctx.env.DB);
       const limit = Math.min(Number(ctx.req.query("limit")) || 25, 100);
@@ -132,6 +148,8 @@ export function registerProductionRoutes(app, deps) {
 
   app.get("/jobs/:id", async (ctx) => {
     if (!ctx.env.DB) return ctx.json({ error: "No DB" }, 500);
+    const auth = await readSignedGet(ctx, `/jobs/${ctx.req.param("id")}`);
+    if (auth) return auth;
     try {
       await ensureTables(ctx.env.DB);
       const job = await getProduction(ctx.env.DB, ctx.req.param("id"));
@@ -208,6 +226,13 @@ export function registerProductionRoutes(app, deps) {
       if (!cur) return ctx.json({ error: "unknown job" }, 404);
       if (!["quality_review", "awaiting_approval"].includes(cur.status))
         return ctx.json({ error: `cannot approve while ${cur.status}` }, 409);
+      const qa = cur.qa || {};
+      if (qa.verdict !== "pass" || (Array.isArray(qa.blocking_failures) && qa.blocking_failures.length)) {
+        return ctx.json({ error: `QA is ${qa.verdict || "missing"}; empty or blocked QA cannot pass` }, 409);
+      }
+      if (qa.synthetic === true || qa.publishable === false) {
+        return ctx.json({ error: "synthetic fixtures cannot be approved for publishing" }, 409);
+      }
       const job = await updateProduction(ctx.env.DB, cur.job_id, {
         status: "approved", approved_at: nowSec(), detail: "approved",
       });
@@ -314,6 +339,9 @@ export function registerProductionRoutes(app, deps) {
       configured: providers.filter((p) => p.state === "configured").map((p) => p.name),
       operational: [],
       publishing_enabled: false,
+      approval_required: true,
+      storage: { d1: Boolean(ctx.env.DB), r2: Boolean(ctx.env.FILES) },
+      retention: { days: Number(ctx.env.RETENTION_DAYS || 90), preserve_approved: true },
       note: "state reflects credential presence only; run provider checks to verify connectivity",
     });
   });
