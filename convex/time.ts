@@ -6,7 +6,7 @@
  * App-wide rule: store UTC milliseconds, speak local time.
  */
 
-export const DEFAULT_TZ = "Europe/Istanbul";
+export const DEFAULT_TZ = "Europe/Nicosia";
 export const DEFAULT_MORNING_HOUR = 7; // local
 export const DEFAULT_EVENING_HOUR = 21; // local
 

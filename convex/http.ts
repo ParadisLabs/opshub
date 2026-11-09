@@ -4,6 +4,12 @@ import { internal } from "./_generated/api";
 
 const http = httpRouter();
 
+const STUDIO_KEYS = new Set([
+  "faceless-studio",
+  "faceless-turkce-studio",
+  "deep-history-studio",
+]);
+
 const NOTIFY_TYPES = new Set([
   "trade.opened",
   "trade.closed",
@@ -126,6 +132,53 @@ http.route({
     }
     const watches = await ctx.runQuery(internal.flips.serveWatches, {});
     return new Response(JSON.stringify({ watches }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }),
+});
+
+// Shared, authenticated image-call admission for all three studios.
+http.route({
+  path: "/ai-usage/reserve",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    const secret = process.env.HUB_WEBHOOK_SECRET;
+    if (!secret) return new Response("not configured", { status: 500 });
+    const signature = req.headers.get("x-hub-signature-256") || "";
+    const body = await req.text();
+    const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+    );
+    const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+    const hex = [...new Uint8Array(mac)]
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
+    if (signature !== `sha256=${hex}`) {
+      return new Response("bad signature", { status: 401 });
+    }
+
+    let input: any;
+    try { input = JSON.parse(body); } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    if (!STUDIO_KEYS.has(input?.studio) ||
+        typeof input?.request_id !== "string" ||
+        !input.request_id || input.request_id.length > 240) {
+      return new Response("bad request", { status: 400 });
+    }
+
+    const now = Date.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    const result = await ctx.runMutation(internal.aiUsage.reserve, {
+      day,
+      studio: input.studio,
+      requestId: input.request_id,
+      globalCap: 24,
+      studioCap: 10,
+      now,
+    });
+    const resetAt = new Date(day + "T00:00:00.000Z").getTime() + 86400000;
+    return new Response(JSON.stringify({ ...result, day, resetAt }), {
       headers: { "Content-Type": "application/json" },
     });
   }),

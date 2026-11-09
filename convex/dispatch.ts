@@ -19,29 +19,37 @@ const WINDOW_MS = 15 * 60_000; // how late a schedule may fire and still count
 export const STUDIOS = [
   {
     key: "turkce",
+    brand: "true_crime",
     repo: "landryparadis012-git/faceless-turkce-studio",
-    label: "Faceless Türkçe",
+    label: "True Crime (Turkish)",
     language: "tr",
     maxEpisodes: 8,
   },
   {
     key: "english",
+    brand: "trendscope",
     repo: "landryparadis012-git/faceless-studio",
-    label: "Faceless English",
+    label: "TrendScope (English)",
     language: "en",
     maxEpisodes: 8,
   },
   {
     key: "history",
+    brand: "deep_history",
     repo: "landryparadis012-git/deep-history-studio",
-    label: "Deep History",
-    language: "tr",
+    label: "Deep History English",
+    language: "en",
     maxEpisodes: 0,
   },
 ] as const;
 
 function studioByKey(key?: string | null) {
-  const k = (key ?? "").trim().toLowerCase();
+  const raw = (key ?? "").trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    trendscope: "english", truecrime: "turkce", "true-crime": "turkce",
+    turkish: "turkce", "deep-history": "history", deep_history: "history",
+  };
+  const k = aliases[raw] ?? raw;
   return STUDIOS.find((s) => s.key === k || s.repo.toLowerCase() === k) ?? null;
 }
 
@@ -256,6 +264,8 @@ export const dispatch = internalAction({
 
     const payload = {
       topic: a.topic ?? "",
+      brand: studio.brand,
+      language: studio.language,
       new_series: a.newSeries === true,
       max_episodes: a.maxEpisodes ?? (studio.maxEpisodes || undefined),
       reason: a.reason ?? `opshub ${kind}`,
@@ -361,6 +371,10 @@ export const createSeriesEverywhere = internalAction({
  */
 export const runDueSchedules = internalAction({
   handler: async (ctx) => {
+    // Fail closed: scheduled studio dispatches stay paused until explicitly enabled.
+    if (process.env.STUDIO_SCHEDULING_ENABLED !== "true") {
+      return { fired: [], paused: true, reason: "STUDIO_SCHEDULING_ENABLED is not true" };
+    }
     const { timezone } = await readSettings(ctx);
     const now = Date.now();
     const schedules: any[] = await ctx.runQuery(internal.dispatch.enabledSchedules, {});
