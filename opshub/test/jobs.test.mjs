@@ -204,3 +204,58 @@ describe("dispatch honesty + readiness", () => {
     assert.deepEqual(networkCalls, []);
   });
 });
+
+// ==========================================================================
+describe("telegram /run all: independent jobs and failure isolation", () => {
+  const telegram = (text, env) =>
+    app.request("/_telegram?echo=1", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: { chat: { id: 1 }, text } }),
+    }, env).then((r) => r.json());
+
+  test("creates three distinct jobs and isolates one dispatch failure", async () => {
+    const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
+    await app.request("/jobs", {}, env); // ensureTables
+
+    const original = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).includes("faceless-turkce-studio")) {
+        throw new Error("simulated github outage");
+      }
+      return { ok: true, status: 204, json: async () => ({}) };
+    };
+    let reply;
+    try {
+      reply = (await telegram("/run all", env)).reply;
+    } finally {
+      globalThis.fetch = original;
+    }
+
+    assert.match(reply, /trendscope/);
+    assert.match(reply, /true-crime/);
+    assert.match(reply, /deep-history/);
+    assert.match(reply, /dispatch (FAILED|error)/);
+    assert.match(reply, /Tracking: \/jobs/);
+
+    const rows = sqlite
+      .prepare("SELECT job_id, studio, status FROM productions ORDER BY studio")
+      .all();
+    assert.equal(rows.length, 3, "three independent jobs must exist");
+    assert.equal(new Set(rows.map((r) => r.job_id)).size, 3, "job ids must be unique");
+    assert.deepEqual(rows.map((r) => r.studio), ["deep-history", "trendscope", "true-crime"]);
+    assert.ok(rows.every((r) => r.status === "dispatched"));
+    assert.equal(calls.filter((u) => u.includes("faceless-turkce-studio")).length, 1);
+  });
+
+  test("an unknown studio is refused without creating a job", async () => {
+    const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
+    await app.request("/jobs", {}, env);
+    const reply = (await telegram("/run nonsense", env)).reply;
+    assert.match(reply, /Usage: \/run/);
+    const count = sqlite.prepare("SELECT COUNT(*) AS n FROM productions").get().n;
+    assert.equal(count, 0);
+  });
+});
