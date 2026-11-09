@@ -22,7 +22,8 @@ from production.providers.gemini import GeminiProvider  # noqa: E402
 from production.providers.groq import GroqProvider  # noqa: E402
 from production.providers.pixabay import PixabayProvider  # noqa: E402
 from production.redact import sanitize  # noqa: E402
-from production.render import (ensure_tools, make_still, render_episode)  # noqa: E402
+from production.render import (RenderError, ensure_tools, make_still,  # noqa: E402
+                               render_episode)
 from production.synthetic import SyntheticLLM  # noqa: E402
 from production.usage import BudgetExceeded, UsageLedger  # noqa: E402
 
@@ -328,6 +329,15 @@ class TestStudios(unittest.TestCase):
             self.assertIn(("video", 320, 568), kinds)
             self.assertIn(("video_landscape", 480, 270), kinds)
             self.assertFalse(result["publishing_enabled"])
+            self.assertIn("narration_coverage", result)
+            self.assertIn("long_form_narration_coverage", result)
+            manifest_path = result["manifest"]["path"]
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            videos = [v for v in manifest["assets"].values() if v["kind"] == "video"]
+            self.assertEqual(len(videos), 2, "both formats must be in the durable manifest")
+            self.assertTrue(any(v["meta"].get("format") == "landscape" for v in videos))
+            self.assertEqual(result["manifest"]["problems"], [])
 
 
 class TestRunner(unittest.TestCase):
@@ -365,6 +375,102 @@ class TestRunner(unittest.TestCase):
                                     studios_to_run=["trendscope"],
                                     cancel=lambda: True)
             self.assertEqual(result["statuses"]["trendscope"], "cancelled")
+
+
+class TestProviderOutages(unittest.TestCase):
+    def test_gemini_malformed_json_is_rejected(self):
+        transport = FakeTransport([
+            (200, json.dumps({"models": [{"name": "models/gemini-3.8-flash",
+                                          "supportedGenerationMethods": ["generateContent"]}]})),
+            (200, "this is not json"),
+        ])
+        provider = GeminiProvider({"GEMINI_API_KEY": SECRET}, transport=transport,
+                                  sleeper=lambda s: None)
+        with self.assertRaises(ProviderError):
+            provider.generate_json("hi", job_id="j")
+
+    def test_gemini_500_retries_then_fails_cleanly(self):
+        transport = FakeTransport([
+            (200, json.dumps({"models": [{"name": "models/gemini-3.8-flash",
+                                          "supportedGenerationMethods": ["generateContent"]}]})),
+            (500, "upstream boom"),
+            (500, "upstream boom"),
+        ])
+        provider = GeminiProvider({"GEMINI_API_KEY": SECRET}, transport=transport,
+                                  sleeper=lambda s: None)
+        with self.assertRaises(ProviderError) as ctx:
+            provider.generate_json("hi", job_id="j", max_attempts=2)
+        self.assertTrue(ctx.exception.retryable)
+        self.assertEqual(len([c for c in transport.calls if c[0] == "POST"]), 2)
+
+    def test_transport_timeout_is_retryable(self):
+        calls = {"n": 0}
+
+        def transport(method, url, headers, body, timeout):
+            if method == "GET":
+                return 200, json.dumps({"models": [{
+                    "name": "models/gemini-3.8-flash",
+                    "supportedGenerationMethods": ["generateContent"]}]})
+            calls["n"] += 1
+            raise ProviderError("transport error: TimeoutError", retryable=True,
+                                provider="gemini")
+
+        provider = GeminiProvider({"GEMINI_API_KEY": SECRET}, transport=transport,
+                                  sleeper=lambda s: None)
+        with self.assertRaises(ProviderError):
+            provider.generate_json("hi", job_id="j", max_attempts=2)
+        self.assertEqual(calls["n"], 2)
+
+    def test_groq_outage_recovers_on_same_key(self):
+        transport = FakeTransport([
+            (200, json.dumps({"data": [{"id": "openai/gpt-oss-120b"}]})),
+            (500, "upstream"),
+            (200, json.dumps({"choices": [{"message": {
+                "content": json.dumps({"ok": 1})}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}})),
+        ])
+        provider = GroqProvider({"GROQ_API_KEY": "gsk_" + "a" * 20},
+                                transport=transport, sleeper=lambda s: None)
+        result = provider.generate_json("hi", job_id="j", max_attempts=2)
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["key_index"], 0)
+
+
+class TestBudgetAndRenderFailures(unittest.TestCase):
+    def test_daily_budget_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = UsageLedger(os.path.join(d, "u.json"), job_calls=99, daily_calls=1)
+            ledger.record("j1", "mock", "m")
+            with self.assertRaises(BudgetExceeded):
+                ledger.check("j2", calls=1)
+
+    def test_interrupted_render_missing_scene_asset(self):
+        ensure_tools()
+        with tempfile.TemporaryDirectory() as d:
+            image = make_still(os.path.join(d, "i.png"), 160, 284, index=1)
+            audio = synthesize("", os.path.join(d, "a.wav"), seconds=1.0)["path"]
+            with self.assertRaises(RenderError):
+                render_episode([{"image": image,
+                                 "audio": os.path.join(d, "missing.wav"),
+                                 "seconds": 1.0, "caption": "x"}],
+                               os.path.join(d, "out.mp4"), width=160, height=284, fps=8)
+
+    def test_srt_uses_narration_and_synthetic_watermark(self):
+        ensure_tools()
+        with tempfile.TemporaryDirectory() as d:
+            image = make_still(os.path.join(d, "i.png"), 160, 284, index=1)
+            audio = synthesize("", os.path.join(d, "a.wav"), seconds=1.5)["path"]
+            report = render_episode(
+                [{"image": image, "audio": audio, "seconds": 1.5,
+                  "caption": "SHORT CAPTION",
+                  "narration": "Spoken narration line."}],
+                os.path.join(d, "out.mp4"), width=160, height=284, fps=8,
+                watermark="SYNTHETIC TEST")
+            with open(report["srt_path"]) as f:
+                srt = f.read()
+            self.assertIn("Spoken narration line.", srt)
+            self.assertNotIn("SHORT CAPTION", srt)
+            self.assertEqual(report["status"], "passed")
 
 
 if __name__ == "__main__":

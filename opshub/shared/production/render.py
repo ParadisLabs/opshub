@@ -234,6 +234,7 @@ def _video_filter(width: int, height: int, fps: int, *, ken_burns: bool,
 
 def make_segment(image: str, audio: str, out_path: str, *, width: int, height: int,
                  fps: int, seconds: float, caption: str = "",
+                 watermark: str = "",
                  ken_burns: bool = False, preset: str = PRESET_DEFAULT,
                  crf: int = 23) -> str:
     if not os.path.exists(image):
@@ -248,6 +249,18 @@ def make_segment(image: str, audio: str, out_path: str, *, width: int, height: i
             f.write(wrap_text(caption))
     vf = _video_filter(width, height, fps, ken_burns=ken_burns,
                        caption_path=caption_path)
+    watermark_path = None
+    font = font_path()
+    if watermark.strip() and font:
+        # Synthetic runs must be unmistakable in the pixels, not only in metadata.
+        watermark_path = out_path + ".watermark.txt"
+        with open(watermark_path, "w") as f:
+            f.write(watermark.strip()[:32])
+        vf += (
+            f",drawtext=fontfile={font}:textfile={watermark_path}:fontcolor=white@0.9:"
+            f"fontsize={max(16, width // 40)}:box=1:boxcolor=black@0.55:boxborderw=12:"
+            f"x=(w-text_w)/2:y={max(12, height // 45)}"
+        )
     cmd = [
         ffmpeg_bin(), "-y", "-loglevel", "error",
         "-loop", "1", "-framerate", str(fps), "-i", image,
@@ -266,6 +279,8 @@ def make_segment(image: str, audio: str, out_path: str, *, width: int, height: i
     _run(cmd, timeout=1200)
     if caption_path and os.path.exists(caption_path):
         os.remove(caption_path)
+    if watermark_path and os.path.exists(watermark_path):
+        os.remove(watermark_path)
     return out_path
 
 
@@ -383,7 +398,8 @@ def validate(video: str, *, width: int, height: int, min_seconds: float,
 def render_episode(scenes: Sequence[Dict[str, Any]], out_path: str, *,
                    width: int, height: int, fps: int = FPS_DEFAULT,
                    ken_burns: bool = False, preset: str = PRESET_DEFAULT,
-                   crf: int = 23, workdir: Optional[str] = None) -> Dict[str, Any]:
+                   crf: int = 23, workdir: Optional[str] = None,
+                   watermark: str = "") -> Dict[str, Any]:
     """Render ordered scenes into one validated MP4 with a sidecar SRT."""
     if not scenes:
         raise RenderError("no scenes to render")
@@ -405,10 +421,11 @@ def render_episode(scenes: Sequence[Dict[str, Any]], out_path: str, *,
         seg = os.path.join(work, f"seg_{i:03d}.mp4")
         make_segment(image, audio, seg, width=width, height=height, fps=fps,
                      seconds=duration, caption=str(scene.get("caption") or ""),
+                     watermark=watermark,
                      ken_burns=ken_burns, preset=preset, crf=crf)
         segments.append(seg)
         cues.append({"start": round(clock, 3), "end": round(clock + duration, 3),
-                     "text": str(scene.get("caption") or scene.get("narration") or "")})
+                     "text": str(scene.get("narration") or scene.get("caption") or "")})
         clock += duration
 
     srt_path = os.path.splitext(out_path)[0] + ".srt"

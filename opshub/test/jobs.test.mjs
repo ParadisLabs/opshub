@@ -258,4 +258,42 @@ describe("telegram /run all: independent jobs and failure isolation", () => {
     const count = sqlite.prepare("SELECT COUNT(*) AS n FROM productions").get().n;
     assert.equal(count, 0);
   });
+
+  test("rejects a chat that is not the configured operator", async () => {
+    const { env, sqlite } = makeEnv({
+      TELEGRAM_CHAT_ID: "42", HUB_GITHUB_TOKEN: "test-token",
+    });
+    await app.request("/jobs", {}, env);
+    const res = await app.request("/_telegram?echo=1", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: { chat: { id: 1 }, text: "/run all" } }),
+    }, env);
+    assert.equal(res.status, 403);
+    const count = sqlite.prepare("SELECT COUNT(*) AS n FROM productions").get().n;
+    assert.equal(count, 0, "an unauthorized chat must not create jobs");
+  });
+
+  test("duplicate /run all is deduplicated while jobs are active", async () => {
+    const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
+    await app.request("/jobs", {}, env);
+    const original = globalThis.fetch;
+    let dispatches = 0;
+    globalThis.fetch = async () => {
+      dispatches += 1;
+      return { ok: true, status: 204, json: async () => ({}) };
+    };
+    let first, second;
+    try {
+      first = (await telegram("/run all", env)).reply;
+      second = (await telegram("/run all", env)).reply;
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.match(first, /dispatched/);
+    assert.match(second, /deduplicated/);
+    const count = sqlite.prepare("SELECT COUNT(*) AS n FROM productions").get().n;
+    assert.equal(count, 3, "a repeated command must not create six jobs");
+    assert.equal(dispatches, 3, "a repeated command must not redispatch");
+  });
 });

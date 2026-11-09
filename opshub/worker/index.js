@@ -308,6 +308,15 @@ function fmtDayClock(epoch, tz) {
 }
 
 // ---------------- HMAC (events from studios / icc-engine) ----------------
+function telegramChatAllowed(env, chatId) {
+  const allowed = String((env && env.TELEGRAM_CHAT_ID) || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!allowed.length) return true; // not configured: local/dev keeps working
+  return allowed.includes(String(chatId));
+}
+
 async function verifySignature(rawBody, header, secret) {
   if (!secret) return false;
   if (!header) return false;
@@ -1889,6 +1898,19 @@ async function handleCommand(text, chatId, ctx, settings) {
     if (!token) return "Cannot dispatch: HUB_GITHUB_TOKEN is not configured on the hub.";
     const lines = [];
     for (const studio of targets) {
+      // Idempotency: a studio already in flight within 10 minutes is reused
+      // instead of creating a duplicate Telegram job.
+      let active = null;
+      try {
+        await ensureTables(db);
+        active = await db.prepare(
+          "SELECT job_id FROM productions WHERE studio = ? AND status IN ('dispatched','accepted','running','quality_review','awaiting_approval') AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
+        ).bind(studio, Math.floor(Date.now() / 1000) - 600).first();
+      } catch (e) { active = null; }
+      if (active && active.job_id) {
+        lines.push(`${studio}: deduplicated (${active.job_id} already active)`);
+        continue;
+      }
       const jobId = `${studio}-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 8)}`;
       try {
         await ensureTables(db);
@@ -2087,6 +2109,13 @@ const telegramHandler = async (ctx) => {
       return ctx.json({ error: "forbidden" }, 403);
     }
     const update = await ctx.req.json();
+    const incomingChat =
+      (update.message && update.message.chat && update.message.chat.id) ??
+      (update.callback_query && update.callback_query.message &&
+        update.callback_query.message.chat && update.callback_query.message.chat.id);
+    if (incomingChat != null && !telegramChatAllowed(ctx.env, incomingChat)) {
+      return ctx.json({ error: "forbidden" }, 403);
+    }
     const botToken = ctx.env.TELEGRAM_BOT_TOKEN;
     const db = ctx.env.DB;
     const settings = db ? await getSettings(db) : { ...DEFAULT_SETTINGS };
