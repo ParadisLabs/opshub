@@ -471,6 +471,47 @@ class TestBudgetAndRenderFailures(unittest.TestCase):
             self.assertIn("Spoken narration line.", srt)
             self.assertNotIn("SHORT CAPTION", srt)
             self.assertEqual(report["status"], "passed")
+            self.assertIn(report["watermark_mode"], ("text", "bar"))
+            self.assertIn("captions_burned", report)
+
+
+class TestStockWiring(unittest.TestCase):
+    class FakeStock:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def configured(self):
+            return True
+
+        def resolve(self, query, dest, **kwargs):
+            if self.fail:
+                raise RuntimeError("stock outage")
+            os.makedirs(dest, exist_ok=True)
+            path = os.path.join(dest, "stock.png")
+            make_still(path, 160, 284, index=2)
+            return {"path": path, "license": "Pixabay Content License",
+                    "sha256": "a" * 64, "asset_id": "1"}
+
+    def _scenes(self, d, stock):
+        return studios._make_scenes(
+            {"scenes": [{"narration": "line", "visual": "city skyline",
+                         "caption": "caption"}]},
+            os.path.join(d, "images"), os.path.join(d, "audio"),
+            width=160, height=284, total_seconds=4, voice="x", allow_tts=False,
+            pixabay=stock, job_id="j")
+
+    def test_pixabay_asset_is_preferred(self):
+        with tempfile.TemporaryDirectory() as d:
+            scenes = self._scenes(d, self.FakeStock())
+            self.assertEqual(scenes[0]["image_source"], "pixabay")
+            self.assertIn("Pixabay", scenes[0]["image_license"])
+            self.assertTrue(os.path.exists(scenes[0]["image"]))
+
+    def test_stock_outage_falls_back_to_labelled_synthetic(self):
+        with tempfile.TemporaryDirectory() as d:
+            scenes = self._scenes(d, self.FakeStock(fail=True))
+            self.assertEqual(scenes[0]["image_source"], "synthetic")
+            self.assertEqual(scenes[0]["image_error"], "RuntimeError")
 
 
 if __name__ == "__main__":

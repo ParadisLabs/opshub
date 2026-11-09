@@ -75,8 +75,11 @@ def font_path() -> Optional[str]:
     candidates = [override] if override else []
     tools = _workspace_tools()
     if tools:
-        candidates.append(os.path.join(tools, "fonts", "DejaVuSans-Bold.ttf"))
-        candidates.append(os.path.join(tools, "fonts", "Roboto-Bold.ttf"))
+        # .tools holds both the ffmpeg build and a sibling fonts/ directory.
+        root = os.path.dirname(tools)
+        for base in (root, tools):
+            candidates.append(os.path.join(base, "fonts", "DejaVuSans-Bold.ttf"))
+            candidates.append(os.path.join(base, "fonts", "Roboto-Bold.ttf"))
     candidates += [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -86,6 +89,22 @@ def font_path() -> Optional[str]:
         if path and os.path.exists(path):
             return path
     return None
+
+
+_FILTERS: Dict[str, bool] = {}
+
+
+def filter_available(name: str) -> bool:
+    """True when this ffmpeg build provides the filter (static builds often lack drawtext)."""
+    if name in _FILTERS:
+        return _FILTERS[name]
+    try:
+        proc = subprocess.run([ffmpeg_bin(), "-hide_banner", "-filters"],
+                              capture_output=True, text=True, timeout=20)
+        _FILTERS[name] = proc.returncode == 0 and bool(re.search(rf"\b{re.escape(name)}\b", proc.stdout))
+    except Exception:  # noqa: BLE001
+        _FILTERS[name] = False
+    return _FILTERS[name]
 
 
 def _run(cmd: Sequence[str], timeout: int = 900) -> subprocess.CompletedProcess:
@@ -127,7 +146,7 @@ def make_still(path: str, width: int, height: int, *, label: str = "",
     vf = [f"drawbox=x=0:y=0:w={width}:h={height}:color={colors[(index + 1) % len(colors)]}@0.55:t=fill"]
     font = font_path()
     text_file = None
-    if font and label.strip():
+    if font and label.strip() and filter_available("drawtext"):
         text_file = path + ".txt"
         with open(text_file, "w") as f:
             f.write(wrap_text(label, 34)[:220])
@@ -223,7 +242,7 @@ def _video_filter(width: int, height: int, fps: int, *, ken_burns: bool,
         )
     parts.append("format=yuv420p")
     font = font_path()
-    if caption_path and font and os.path.exists(caption_path):
+    if caption_path and font and filter_available("drawtext") and os.path.exists(caption_path):
         parts.append(
             f"drawtext=fontfile={font}:textfile={caption_path}:fontcolor=white:"
             f"fontsize={max(22, width // 30)}:box=1:boxcolor=black@0.45:"
@@ -251,16 +270,21 @@ def make_segment(image: str, audio: str, out_path: str, *, width: int, height: i
                        caption_path=caption_path)
     watermark_path = None
     font = font_path()
-    if watermark.strip() and font:
+    if watermark.strip():
         # Synthetic runs must be unmistakable in the pixels, not only in metadata.
-        watermark_path = out_path + ".watermark.txt"
-        with open(watermark_path, "w") as f:
-            f.write(watermark.strip()[:32])
-        vf += (
-            f",drawtext=fontfile={font}:textfile={watermark_path}:fontcolor=white@0.9:"
-            f"fontsize={max(16, width // 40)}:box=1:boxcolor=black@0.55:boxborderw=12:"
-            f"x=(w-text_w)/2:y={max(12, height // 45)}"
-        )
+        if font and filter_available("drawtext"):
+            watermark_path = out_path + ".watermark.txt"
+            with open(watermark_path, "w") as f:
+                f.write(watermark.strip()[:32])
+            vf += (
+                f",drawtext=fontfile={font}:textfile={watermark_path}:fontcolor=white@0.9:"
+                f"fontsize={max(16, width // 40)}:box=1:boxcolor=black@0.55:boxborderw=12:"
+                f"x=(w-text_w)/2:y={max(12, height // 45)}"
+            )
+        else:
+            # No freetype in this build: draw an unmistakable red band instead.
+            vf += (f",drawbox=x=0:y=0:w={width}:h={max(8, height // 16)}:"
+                   f"color=red@0.8:t=fill")
     cmd = [
         ffmpeg_bin(), "-y", "-loglevel", "error",
         "-loop", "1", "-framerate", str(fps), "-i", image,
@@ -448,4 +472,8 @@ def render_episode(scenes: Sequence[Dict[str, Any]], out_path: str, *,
         report["thumbnail"] = None
     report["scenes"] = len(scenes)
     report["fps"] = fps
+    report["captions_burned"] = bool(font_path() and filter_available("drawtext"))
+    report["watermark_mode"] = (
+        ("text" if filter_available("drawtext") and font_path() else "bar")
+        if watermark.strip() else "none")
     return report

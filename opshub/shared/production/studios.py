@@ -96,7 +96,8 @@ def _pad_with_bed(path: str, seconds: float) -> None:
 
 def _make_scenes(script: Dict[str, Any], image_dir: str, audio_dir: str, *,
                  width: int, height: int, total_seconds: float,
-                 voice: str, allow_tts: bool) -> List[Dict[str, Any]]:
+                 voice: str, allow_tts: bool,
+                 pixabay: Any = None, job_id: str = "") -> List[Dict[str, Any]]:
     raw = script.get("scenes") or script.get("chapters") or []
     if not raw:
         raise ValueError("script has no scenes")
@@ -105,8 +106,21 @@ def _make_scenes(script: Dict[str, Any], image_dir: str, audio_dir: str, *,
     for i, item in enumerate(raw, start=1):
         narration = str(item.get("narration") or item.get("text") or "").strip()
         caption = str(item.get("caption") or narration)[:180]
-        image = _synthetic_image(os.path.join(image_dir, f"scene_{i:02d}.png"),
-                                 width, height, str(item.get("visual") or caption), i)
+        visual = str(item.get("visual") or caption)
+        image = None
+        image_source, image_license, image_sha, image_error = "synthetic", "", "", ""
+        if pixabay is not None and getattr(pixabay, "configured", lambda: False)():
+            try:
+                asset = pixabay.resolve(visual, image_dir, kind="photo", job_id=job_id)
+                image = str(asset["path"])
+                image_source = "pixabay"
+                image_license = str(asset.get("license") or "")
+                image_sha = str(asset.get("sha256") or "")
+            except Exception as exc:  # noqa: BLE001 - stock is optional, fallback is labelled
+                image_error = type(exc).__name__
+        if not image:
+            image = _synthetic_image(os.path.join(image_dir, f"scene_{i:02d}.png"),
+                                     width, height, visual, i)
         audio = os.path.join(audio_dir, f"scene_{i:02d}.wav")
         spoken = synthesize(narration, audio, voice=voice, allow_network=allow_tts)
         target = round(max(per, float(spoken["seconds"]) + 0.35), 3)
@@ -116,7 +130,9 @@ def _make_scenes(script: Dict[str, Any], image_dir: str, audio_dir: str, *,
             actual = probe_duration(audio)
         scenes.append({
             "index": i, "narration": narration, "caption": caption,
-            "visual": str(item.get("visual") or ""), "image": image,
+            "visual": str(item.get("visual") or ""),            "image": image, "image_source": image_source,
+            "image_license": image_license, "image_sha256": image_sha,
+            "image_error": image_error,
             "audio": audio, "seconds": round(max(target, actual), 3),
             "narration_seconds": float(spoken["seconds"]),
             "narration_mode": spoken["mode"],
@@ -133,7 +149,12 @@ def _finish(job: Job, studio: str, outdir: str, video_report: Dict[str, Any],
     store = AssetStore(os.path.join(outdir, "manifests"), studio)
     for scene in scenes:
         if os.path.exists(scene["image"]):
-            store.add_file("image", scene["image"], {"scene": scene["index"]})
+            store.add_file("image", scene["image"], {
+                "scene": scene["index"],
+                "source": scene.get("image_source", "synthetic"),
+                "license": scene.get("image_license", ""),
+                "sha256": scene.get("image_sha256", ""),
+            })
         if os.path.exists(scene["audio"]):
             store.add_file("audio", scene["audio"],
                            {"scene": scene["index"],
@@ -211,7 +232,8 @@ def trendscope(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[st
                           os.path.join(outdir, "audio"), width=dims["width"],
                           height=dims["height"], total_seconds=dims["seconds"],
                           voice=ctx.get("voice", "en-US-GuyNeural"),
-                          allow_tts=ctx.get("allow_tts", True))
+                          allow_tts=ctx.get("allow_tts", True),
+                          pixabay=ctx.get("pixabay"), job_id=job.job_id)
     coverage = _coverage(scenes)
     synthetic = bool(research.get("synthetic") or script.get("synthetic"))
     if not synthetic and coverage < 0.5:
@@ -305,7 +327,8 @@ def true_crime(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[st
                           os.path.join(outdir, "audio"), width=dims["width"],
                           height=dims["height"], total_seconds=dims["seconds"],
                           voice=ctx.get("voice_tr", "tr-TR-AhmetNeural"),
-                          allow_tts=ctx.get("allow_tts", True))
+                          allow_tts=ctx.get("allow_tts", True),
+                          pixabay=ctx.get("pixabay"), job_id=job.job_id)
     coverage = _coverage(scenes)
     synthetic = bool(dossier.get("synthetic") or script.get("synthetic"))
     if not synthetic and coverage < 0.5:
@@ -382,7 +405,7 @@ def deep_history(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[
         {"scenes": script["chapters"][:3]}, os.path.join(outdir, "images_short"),
         os.path.join(outdir, "audio_short"), width=short["width"],
         height=short["height"], total_seconds=short["seconds"], voice=voice,
-        allow_tts=allow_tts)
+        allow_tts=allow_tts, pixabay=ctx.get("pixabay"), job_id=job.job_id)
     report("rendering", 55, "rendering vertical short")
     short_coverage = _coverage(short_scenes)
     if not synthetic and short_coverage < 0.5:
@@ -398,7 +421,7 @@ def deep_history(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[
         {"scenes": script["chapters"]}, os.path.join(outdir, "images_long"),
         os.path.join(outdir, "audio_long"), width=long["width"],
         height=long["height"], total_seconds=long["seconds"], voice=voice,
-        allow_tts=allow_tts)
+        allow_tts=allow_tts, pixabay=ctx.get("pixabay"), job_id=job.job_id)
     report("rendering", 85, "rendering landscape documentary")
     long_coverage = _coverage(long_scenes)
     if not synthetic and long_coverage < 0.5:
