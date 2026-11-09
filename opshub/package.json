@@ -5,11 +5,16 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node test/hub.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "test:jobs": "node test/jobs.test.mjs",
     "test:dashboard": "node test/dashboard.test.mjs",
     "test:files": "node test/files.test.mjs",
+    "test:webhook": "node test/webhook.test.mjs",
+    "test:audit": "node test/audit.test.mjs",
+    "test:all": "node --test test/*.test.mjs",
     "preflight": "node scripts/preflight.mjs",
+    "deploy:worker": "node scripts/deploy-worker.mjs",
+    "deploy:worker:dry": "node scripts/deploy-worker.mjs --dry-run",
     "provision:r2": "node scripts/provision-r2.mjs"
   },
   "dependencies": {

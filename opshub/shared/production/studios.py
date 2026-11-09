@@ -18,7 +18,7 @@ import os
 import subprocess
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from . import qa
+from . import media, qa
 from .assets import AssetStore
 from .contracts import Job
 from .narration import synthesize
@@ -29,6 +29,76 @@ FORMAT_LANDSCAPE = {"width": 1920, "height": 1080, "min_s": 480, "max_s": 900}
 
 ALLOWED_CLAIM_STATUS = {"confirmed", "developing", "analysis"}
 ALLOWED_CASE_STATUS = {"allegation", "charge", "conviction", "unresolved"}
+TRENDSCOPE_STYLE = "clean editorial technology imagery; no fabricated product screenshots"
+TRUE_CRIME_STYLE = ("restrained evidence-led documentary: maps, courthouse exteriors and "
+                    "public exhibits; never victims, minors or gore")
+DEEP_HISTORY_STYLE = ("restrained archival documentary: maps, artefacts, architecture and "
+                      "public-domain photographs; muted palette; no gore, no reenactment violence")
+MIN_WORDS_PER_SECOND = 2.0  # 120 wpm floor; short scripts must be rejected, not padded
+
+
+class ModerationBlocked(RuntimeError):
+    """Provider safety refusal. Never retry the same rejected prompt."""
+
+
+def _is_moderation_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in ("8007", "moderation", "blocked", "safety", "refused"))
+
+
+def _deep_generate(llm: Any, prompt: str, *, schema: Dict[str, Any], job_id: str) -> Dict[str, Any]:
+    try:
+        return llm.generate_json(prompt, schema=schema, job_id=job_id)["data"]
+    except Exception as exc:  # noqa: BLE001 - classify, never retry a refused prompt
+        if _is_moderation_error(exc):
+            return {"_moderation_blocked": True,
+                    "reason": "provider moderation refusal (8007/safety); prompt was not retried"}
+        raise
+
+
+def _word_count(chapters: Sequence[Dict[str, Any]]) -> int:
+    return sum(len(str(ch.get("narration") or ch.get("text") or "").split())
+               for ch in chapters)
+
+
+def _educational_fallback(job: Job, ctx: Dict[str, Any], report: Report) -> Dict[str, Any]:
+    """Safe, non-publishable fallback after a provider moderation refusal.
+
+    It makes no historical claims, shows no archival-looking reenactment, and
+    carries a visible marker. Approval is blocked by design.
+    """
+    outdir = os.path.join(ctx["outdir"], "deep-history-fallback")
+    dims = _dims(ctx, "short")
+    topic = (job.topic or "the requested topic")[:160]
+    lines = [
+        "This is an educational fallback. A provider safety filter blocked the requested historical material, so no claims or reconstructed scenes are presented.",
+        f"The requested topic was: {topic}. Consult primary sources and archives before drawing any conclusion.",
+        "No historical footage is shown. Every visual in this clip is a labelled educational card, not evidence.",
+    ]
+    report("qa", 95, "moderation fallback")
+    scenes = _make_scenes(
+        {"scenes": [{"narration": line, "caption": line, "visual": "educational card"}
+                    for line in lines]},
+        os.path.join(outdir, "images"), os.path.join(outdir, "audio"),
+        width=dims["width"], height=dims["height"], total_seconds=dims["seconds"],
+        voice=str(ctx.get("voice") or "en-US-GuyNeural"),
+        allow_tts=ctx.get("allow_tts", True), asset_sources=[],
+        job_id=job.job_id, visual_style="flat educational card")
+    video = render_episode(
+        scenes, os.path.join(outdir, "educational_fallback.mp4"),
+        width=dims["width"], height=dims["height"], fps=dims["fps"],
+        watermark="EDUCATIONAL FALLBACK — NO HISTORICAL CLAIMS",
+        ken_burns=False, preset="veryfast")
+    scores = {"research": 0, "script": 20, "visuals": 10, "narration": 40,
+              "audio": 60, "subtitles": 60, "rendering": 60, "compliance": 100}
+    return _finish(
+        job, "deep-history", outdir, video, scenes, scores,
+        blocking=["moderation refusal: fallback contains no verified historical claims"],
+        extra_qa={"studio": "deep-history", "language": "en", "topic": job.topic,
+                  "synthetic": True, "publishable": False, "moderation_fallback": True,
+                  "moderation_reason": "provider safety refusal (8007); prompt not retried",
+                  "research": {"sources": [], "narrator": None},
+                  "production_mode": job.production_mode})
 
 Report = Callable[[str, int, str], None]
 
@@ -97,7 +167,8 @@ def _pad_with_bed(path: str, seconds: float) -> None:
 def _make_scenes(script: Dict[str, Any], image_dir: str, audio_dir: str, *,
                  width: int, height: int, total_seconds: float,
                  voice: str, allow_tts: bool,
-                 pixabay: Any = None, job_id: str = "") -> List[Dict[str, Any]]:
+                 pixabay: Any = None, asset_sources: Optional[Sequence[Any]] = None,
+                 job_id: str = "", visual_style: str = "") -> List[Dict[str, Any]]:
     raw = script.get("scenes") or script.get("chapters") or []
     if not raw:
         raise ValueError("script has no scenes")
@@ -107,15 +178,28 @@ def _make_scenes(script: Dict[str, Any], image_dir: str, audio_dir: str, *,
         narration = str(item.get("narration") or item.get("text") or "").strip()
         caption = str(item.get("caption") or narration)[:180]
         visual = str(item.get("visual") or caption)
+        query = (visual + (" " + visual_style if visual_style else "")).strip()
         image = None
         image_source, image_license, image_sha, image_error = "synthetic", "", "", ""
-        if pixabay is not None and getattr(pixabay, "configured", lambda: False)():
+        image_author, image_page, image_retrieved = "", "", 0
+        sources: List[Any] = []
+        for source in [pixabay, *(asset_sources or [])]:
+            if source is None or source in sources:
+                continue
+            if getattr(source, "configured", lambda: False)():
+                sources.append(source)
+        for source in sources:
             try:
-                asset = pixabay.resolve(visual, image_dir, kind="photo", job_id=job_id)
+                asset = source.resolve(query, image_dir, kind="photo", job_id=job_id)
                 image = str(asset["path"])
-                image_source = "pixabay"
+                image_source = str(asset.get("source") or getattr(source, "name", "")
+                                     or ("pixabay" if source is pixabay else "stock"))
                 image_license = str(asset.get("license") or "")
                 image_sha = str(asset.get("sha256") or "")
+                image_author = str(asset.get("author") or "")
+                image_page = str(asset.get("page_url") or "")
+                image_retrieved = int(asset.get("retrieved_at") or 0)
+                break
             except Exception as exc:  # noqa: BLE001 - stock is optional, fallback is labelled
                 image_error = type(exc).__name__
         if not image:
@@ -130,8 +214,11 @@ def _make_scenes(script: Dict[str, Any], image_dir: str, audio_dir: str, *,
             actual = probe_duration(audio)
         scenes.append({
             "index": i, "narration": narration, "caption": caption,
-            "visual": str(item.get("visual") or ""),            "image": image, "image_source": image_source,
-            "image_license": image_license, "image_sha256": image_sha,
+            "visual": str(item.get("visual") or ""), "image": image,
+            "image_source": image_source, "image_license": image_license,
+            "image_sha256": image_sha, "image_author": image_author,
+            "image_page_url": image_page, "image_retrieved_at": image_retrieved,
+            "image_style": visual_style, "historical_evidence": False,
             "image_error": image_error,
             "audio": audio, "seconds": round(max(target, actual), 3),
             "narration_seconds": float(spoken["seconds"]),
@@ -153,6 +240,11 @@ def _finish(job: Job, studio: str, outdir: str, video_report: Dict[str, Any],
                 "scene": scene["index"],
                 "source": scene.get("image_source", "synthetic"),
                 "license": scene.get("image_license", ""),
+                "author": scene.get("image_author", ""),
+                "page_url": scene.get("image_page_url", ""),
+                "retrieved_at": scene.get("image_retrieved_at", 0),
+                "historical_evidence": False,
+                "style": scene.get("image_style", ""),
                 "sha256": scene.get("image_sha256", ""),
             })
         if os.path.exists(scene["audio"]):
@@ -180,7 +272,16 @@ def _finish(job: Job, studio: str, outdir: str, video_report: Dict[str, Any],
         if extra.get("thumbnail") and os.path.exists(extra["thumbnail"]):
             store.add_file("thumbnail", extra["thumbnail"], {"format": "landscape"})
 
-    report = qa.evaluate(scores, blocking_failures=blocking or [], job_id=job.job_id)
+    # Every studio gets the same non-optional media QA, not a hardcoded score.
+    video_qa = media.validate_video(
+        video, expected_width=video_report.get("width"), expected_height=video_report.get("height"),
+        min_seconds=max(1.0, float(video_report.get("duration") or 0) * 0.9),
+        max_seconds=max(60.0, float(video_report.get("duration") or 0) * 1.2))
+    blockers = list(blocking or [])
+    if video_qa["status"] != "passed":
+        blockers.append("media QA failed: " + "; ".join(video_qa["errors"][:3]))
+    report = qa.evaluate(scores, blocking_failures=blockers, job_id=job.job_id)
+    report["media_validation"] = video_qa
     report.update(extra_qa or {})
     report["artifacts"] = [{
         "type": "video", "path": video, "bytes": video_report["size_bytes"],
@@ -233,7 +334,9 @@ def trendscope(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[st
                           height=dims["height"], total_seconds=dims["seconds"],
                           voice=ctx.get("voice", "en-US-GuyNeural"),
                           allow_tts=ctx.get("allow_tts", True),
-                          pixabay=ctx.get("pixabay"), job_id=job.job_id)
+                          pixabay=ctx.get("pixabay"),
+                          asset_sources=ctx.get("asset_sources"),
+                          job_id=job.job_id, visual_style=TRENDSCOPE_STYLE)
     coverage = _coverage(scenes)
     synthetic = bool(research.get("synthetic") or script.get("synthetic"))
     if not synthetic and coverage < 0.5:
@@ -328,7 +431,9 @@ def true_crime(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[st
                           height=dims["height"], total_seconds=dims["seconds"],
                           voice=ctx.get("voice_tr", "tr-TR-AhmetNeural"),
                           allow_tts=ctx.get("allow_tts", True),
-                          pixabay=ctx.get("pixabay"), job_id=job.job_id)
+                          pixabay=ctx.get("pixabay"),
+                          asset_sources=ctx.get("asset_sources"),
+                          job_id=job.job_id, visual_style=TRUE_CRIME_STYLE)
     coverage = _coverage(scenes)
     synthetic = bool(dossier.get("synthetic") or script.get("synthetic"))
     if not synthetic and coverage < 0.5:
@@ -360,17 +465,31 @@ def true_crime(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[st
 def deep_history(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[str, Any]:
     llm = ctx["llm"]
     outdir = os.path.join(ctx["outdir"], "deep-history")
+    language = str(job.language or "en").strip().lower()
+    if language not in ("en", "en-us", "english"):
+        raise RuntimeError(f"deep-history language gate: expected English, got {job.language!r}")
+    voice = str(ctx.get("voice") or "en-US-GuyNeural")
+    if not voice.lower().startswith("en-"):
+        raise RuntimeError(f"deep-history voice gate: expected an English voice, got {voice!r}")
+    short = _dims(ctx, "short")
+    long = _dims(ctx, "landscape")
+    required_words = max(120, int(round(long["seconds"] * MIN_WORDS_PER_SECOND)))
     report("research", 5, "validating chronology")
-    research = llm.generate_json(
+    research = _deep_generate(
+        llm,
         "STAGE:research\nEvidence-based historical research. Return a timeline with "
         "explicit ordering, sources and a fixed narrator persona for continuity.\n"
+        "LANGUAGE: English only. Every claim must be traceable to a named source.\n"
+        "VISUAL STYLE: " + DEEP_HISTORY_STYLE + "\n"
         "TOPIC: " + (job.topic or "the Silk Road"),
         schema={"stage": "research",
                 "required": ["topic", "timeline", "sources", "narrator"],
                 "types": {"topic": "str", "timeline": "list", "sources": "list",
                           "narrator": "dict"},
                 "min_items": {"timeline": 4, "sources": 2}},
-        job_id=job.job_id)["data"]
+        job_id=job.job_id)
+    if research.get("_moderation_blocked"):
+        return _educational_fallback(job, ctx, report)
 
     order = [int(item.get("order", i))
              for i, item in enumerate(research.get("timeline", []), start=1)]
@@ -383,29 +502,46 @@ def deep_history(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[
         raise RuntimeError("deep-history continuity gate: narrator persona missing")
 
     report("writing", 25, "writing long-form narrative")
-    script = llm.generate_json(
+    narrator = research.get("narrator") or {}
+    script_prompt = (
         "STAGE:script\nWrite one coherent long-form documentary narrative with "
-        "chapters, not separate shorts. Keep the same narrator. JSON only.\n"
-        "RESEARCH:\n" + json.dumps(research)[:6000],
+        "chapters, not separate shorts. Keep the same narrator. English only. "
+        f"At least {required_words} spoken words for the {int(long['seconds'])}-second "
+        "landscape cut; do not pad with silence. JSON only.\n"
+        "VISUAL STYLE: " + DEEP_HISTORY_STYLE + "\n"
+        "NARRATOR: " + str(narrator.get("name") or "the recurring explorer") + "\n"
+        "RESEARCH:\n" + json.dumps(research)[:6000]
+    )
+    script = _deep_generate(
+        llm, script_prompt,
         schema={"stage": "script", "required": ["title", "chapters"],
                 "types": {"title": "str", "chapters": "list"},
                 "min_items": {"chapters": 5}},
-        job_id=job.job_id)["data"]
+        job_id=job.job_id)
+    if script.get("_moderation_blocked"):
+        return _educational_fallback(job, ctx, report)
     for chapter in script.get("chapters", []):
         chapter.setdefault("caption", chapter.get("narration", ""))
+        if not chapter.get("visual"):
+            chapter["visual"] = (f"archival documentary scene with {narrator.get('name') or 'the explorer'}, "
+                                 f"{DEEP_HISTORY_STYLE}")
 
     synthetic = bool(research.get("synthetic") or script.get("synthetic"))
-    voice = ctx.get("voice", "en-US-GuyNeural")
     allow_tts = ctx.get("allow_tts", True)
-    short = _dims(ctx, "short")
-    long = _dims(ctx, "landscape")
+    script_words = _word_count(script.get("chapters", []))
+    if not synthetic and script_words < required_words:
+        raise RuntimeError(
+            f"deep-history length gate: {script_words} spoken words for {int(long['seconds'])}s; "
+            f"need at least {required_words}. Short scripts are rejected, not padded.")
 
     report("assets", 40, "building vertical short")
     short_scenes = _make_scenes(
         {"scenes": script["chapters"][:3]}, os.path.join(outdir, "images_short"),
         os.path.join(outdir, "audio_short"), width=short["width"],
         height=short["height"], total_seconds=short["seconds"], voice=voice,
-        allow_tts=allow_tts, pixabay=ctx.get("pixabay"), job_id=job.job_id)
+        allow_tts=allow_tts, pixabay=ctx.get("pixabay"),
+        asset_sources=ctx.get("asset_sources"), job_id=job.job_id,
+        visual_style=DEEP_HISTORY_STYLE)
     report("rendering", 55, "rendering vertical short")
     short_coverage = _coverage(short_scenes)
     if not synthetic and short_coverage < 0.5:
@@ -421,7 +557,9 @@ def deep_history(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[
         {"scenes": script["chapters"]}, os.path.join(outdir, "images_long"),
         os.path.join(outdir, "audio_long"), width=long["width"],
         height=long["height"], total_seconds=long["seconds"], voice=voice,
-        allow_tts=allow_tts, pixabay=ctx.get("pixabay"), job_id=job.job_id)
+        allow_tts=allow_tts, pixabay=ctx.get("pixabay"),
+        asset_sources=ctx.get("asset_sources"), job_id=job.job_id,
+        visual_style=DEEP_HISTORY_STYLE)
     report("rendering", 85, "rendering landscape documentary")
     long_coverage = _coverage(long_scenes)
     if not synthetic and long_coverage < 0.5:
@@ -433,17 +571,38 @@ def deep_history(job: Job, ctx: Dict[str, Any], report: Report = _noop) -> Dict[
         ken_burns=False, preset="ultrafast")
 
     narration_mode = short_scenes[0]["narration_mode"] if short_scenes else "unavailable"
+    short_media = media.validate_video(
+        short_video["path"], expected_width=short["width"], expected_height=short["height"],
+        min_seconds=short["seconds"] * 0.9,
+        max_seconds=max(short["seconds"] * 1.15, 30))
+    long_media = media.validate_video(
+        long_video["path"], expected_width=long["width"], expected_height=long["height"],
+        min_seconds=long["seconds"] * 0.9,
+        max_seconds=max(long["seconds"] * 1.15, 60))
+    blocking: List[str] = []
+    if short_media["status"] != "passed":
+        blocking.append("short media QA failed: " + "; ".join(short_media["errors"][:3]))
+    if long_media["status"] != "passed":
+        blocking.append("long-form media QA failed: " + "; ".join(long_media["errors"][:3]))
     scores = {"research": 92, "script": 88, "visuals": 78,
               "narration": 80 if narration_mode == "edge-tts" else 55,
               "audio": 90, "subtitles": 90, "rendering": 95, "compliance": 100}
     report("qa", 95, "scoring QA")
     return _finish(job, "deep-history", outdir, short_video, short_scenes, scores,
+                   blocking=blocking,
                    extra_qa={
                        "studio": "deep-history", "language": "en", "topic": job.topic,
                        "research": {"sources": research.get("sources", []),
                                     "narrator": narrator},
                        "narration_mode": narration_mode,
                        "synthetic": synthetic,
+                       "publishable": bool(not synthetic and not blocking),
+                       "script_words": script_words, "required_words": required_words,
+                       "words_per_second": MIN_WORDS_PER_SECOND,
+                       "visual_style": DEEP_HISTORY_STYLE,
+                       "narrator_name": narrator.get("name"),
+                       "negative_prompt": "no gore, no reenactment violence, no fake historical footage",
+                       "media_qa": {"short": short_media, "long": long_media},
                        "narration_coverage": short_coverage,
                        "long_form_narration_coverage": long_coverage,
                        "production_mode": job.production_mode,

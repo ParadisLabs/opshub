@@ -13,6 +13,11 @@ const ENGINES = {
     eventType: "opshub.flip",
     label: "Business Flip",
   },
+  benji: {
+    repo: "",
+    eventType: "",
+    label: "Free Benji",
+  },
 } as const;
 
 export const dispatchEngine = internalAction({
@@ -21,6 +26,9 @@ export const dispatchEngine = internalAction({
     const key = args.engineKey.trim().toLowerCase() as keyof typeof ENGINES;
     const engine = ENGINES[key];
     if (!engine) return { ok: false, error: `Unknown engine: ${args.engineKey}` };
+    if (!engine.repo || !engine.eventType) {
+      return { ok: false, engine: key, error: "no Free Benji repository or workflow is connected" };
+    }
     const token = process.env.OPSHUB_GITHUB_TOKEN || process.env.GITHUB_DISPATCH_TOKEN;
     if (!token) return { ok: false, engine: key, error: "OPSHUB_GITHUB_TOKEN is not set" };
     try {
@@ -57,6 +65,7 @@ export const runAll = internalAction({
       ctx.runAction(internal.dispatch.runStudio, { studioKey: "history", reason: "telegram /run all" }),
       ctx.runAction(internal.engineDispatch.dispatchEngine, { engineKey: "icc", reason: "telegram /run all" }),
       ctx.runAction(internal.engineDispatch.dispatchEngine, { engineKey: "flip", reason: "telegram /run all" }),
+      ctx.runAction(internal.engineDispatch.dispatchEngine, { engineKey: "benji", reason: "telegram /run all" }),
     ];
     const results = await Promise.all(targets);
     return { ok: results.every((result: any) => result?.ok), results };

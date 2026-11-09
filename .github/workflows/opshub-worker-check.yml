@@ -20,7 +20,22 @@ jobs:
           cache-dependency-path: opshub/package-lock.json
       - name: Install OpsHub dependencies
         run: npm ci --prefix opshub
-      - name: Run existing OpsHub tests
+      - name: Run OpsHub Node tests
         run: npm test --prefix opshub
       - name: Check Cloudflare Worker syntax
         run: node --check opshub/worker/index.js
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install FFmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Run production pipeline tests
+        working-directory: opshub
+        env:
+          TTS_MODE: synthetic
+        run: python -m unittest test_py.test_phase3 test_py.test_storage

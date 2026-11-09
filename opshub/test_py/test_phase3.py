@@ -20,7 +20,9 @@ from production.providers.base import ProviderError  # noqa: E402
 from production.providers.chain import ProviderChain  # noqa: E402
 from production.providers.gemini import GeminiProvider  # noqa: E402
 from production.providers.groq import GroqProvider  # noqa: E402
+from production.providers.internet_archive import InternetArchiveProvider  # noqa: E402
 from production.providers.pixabay import PixabayProvider  # noqa: E402
+from production.providers.wikimedia import WikimediaProvider  # noqa: E402
 from production.redact import sanitize  # noqa: E402
 from production.render import (RenderError, ensure_tools, make_still,  # noqa: E402
                                render_episode)
@@ -512,6 +514,116 @@ class TestStockWiring(unittest.TestCase):
             scenes = self._scenes(d, self.FakeStock(fail=True))
             self.assertEqual(scenes[0]["image_source"], "synthetic")
             self.assertEqual(scenes[0]["image_error"], "RuntimeError")
+
+    def test_asset_sources_record_author_licence_and_page(self):
+        class Source(self.FakeStock):
+            def resolve(self, query, dest, **kwargs):
+                asset = super().resolve(query, dest, **kwargs)
+                asset.update({"source": "wikimedia", "author": "A. Photographer",
+                              "page_url": "https://commons.wikimedia.org/wiki/File:X",
+                              "retrieved_at": 123})
+                return asset
+
+        with tempfile.TemporaryDirectory() as d:
+            scenes = studios._make_scenes(
+                {"scenes": [{"narration": "line", "visual": "map"}]},
+                os.path.join(d, "images"), os.path.join(d, "audio"),
+                width=160, height=284, total_seconds=4, voice="x", allow_tts=False,
+                asset_sources=[Source()], job_id="j", visual_style="archival")
+            self.assertEqual(scenes[0]["image_source"], "wikimedia")
+            self.assertEqual(scenes[0]["image_author"], "A. Photographer")
+            self.assertIn("commons.wikimedia.org", scenes[0]["image_page_url"])
+            self.assertFalse(scenes[0]["historical_evidence"])
+
+
+class TestArchiveProviders(unittest.TestCase):
+    def test_wikimedia_keeps_attribution(self):
+        body = json.dumps({"query": {"pages": {"1": {
+            "pageid": 1, "imageinfo": [{
+                "mime": "image/jpeg", "descriptionurl": "https://commons.wikimedia.org/wiki/File:X",
+                "thumburl": "https://upload.wikimedia.org/x.jpg", "width": 800, "height": 600,
+                "extmetadata": {
+                    "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                    "Artist": {"value": "<a>Jane Doe</a>"},
+                    "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"},
+                },
+            }],
+        }}}}).encode()
+        calls = []
+        def transport(url, timeout):
+            calls.append(url)
+            return 200, body
+        def downloader(url, timeout):
+            return 200, b"\x89PNG\r\n\x1a\n" + b"x" * 20
+        provider = WikimediaProvider(transport=transport, downloader=downloader)
+        with tempfile.TemporaryDirectory() as d:
+            asset = provider.resolve("silk road map", d, job_id="j")
+            self.assertEqual(asset["source"], "wikimedia")
+            self.assertEqual(asset["author"], "Jane Doe")
+            self.assertEqual(asset["license"], "CC BY-SA 4.0")
+            self.assertIn("creativecommons.org", asset["license_url"])
+            self.assertTrue(os.path.exists(asset["path"]))
+            self.assertTrue(calls[0].startswith("https://commons.wikimedia.org/w/api.php"))
+
+    def test_internet_archive_uses_metadata_and_rights(self):
+        def transport(url, timeout):
+            if "advancedsearch" in url:
+                return 200, json.dumps({"response": {"docs": [
+                    {"identifier": "item-1", "title": "Map", "licenseurl": "https://rights.example/"}]}}).encode()
+            return 200, json.dumps({
+                "metadata": {"creator": "Archive Author", "rights": "Public Domain"},
+                "files": [{"name": "map.jpg", "format": "JPEG"}],
+            }).encode()
+        provider = InternetArchiveProvider(
+            transport=transport,
+            downloader=lambda url, timeout: (200, b"\xff\xd8\xff" + b"y" * 20))
+        with tempfile.TemporaryDirectory() as d:
+            asset = provider.resolve("old map", d, job_id="j")
+            self.assertEqual(asset["source"], "internet-archive")
+            self.assertEqual(asset["author"], "Archive Author")
+            self.assertIn("rights.example", asset["license"])
+            self.assertTrue(os.path.exists(asset["path"]))
+
+
+class TestDeepHistoryGates(unittest.TestCase):
+    def test_rejects_non_english_language_and_voice(self):
+        with tempfile.TemporaryDirectory() as d:
+            job = Job(job_id="j", studio="deep-history", language="tr")
+            with self.assertRaisesRegex(RuntimeError, "language gate"):
+                studios.deep_history(job, small_ctx(d))
+            job = Job(job_id="j", studio="deep-history", language="en")
+            ctx = small_ctx(d); ctx["voice"] = "tr-TR-AhmetNeural"
+            with self.assertRaisesRegex(RuntimeError, "voice gate"):
+                studios.deep_history(job, ctx)
+
+    def test_moderation_refusal_uses_safe_nonpublishable_fallback(self):
+        class Refusing:
+            calls = 0
+            def generate_json(self, *a, **k):
+                self.calls += 1
+                raise RuntimeError("provider moderation 8007")
+        llm = Refusing()
+        with tempfile.TemporaryDirectory() as d:
+            ctx = small_ctx(d, llm=llm)
+            result = studios.deep_history(Job(job_id="j", studio="deep-history"), ctx)
+            self.assertTrue(result["moderation_fallback"])
+            self.assertFalse(result["publishable"])
+            self.assertEqual(result["verdict"], "blocked")
+            self.assertEqual(llm.calls, 1, "the refused prompt must not be retried")
+            self.assertTrue(any("moderation" in b for b in result["blocking_failures"]))
+
+    def test_short_non_synthetic_script_is_rejected_not_padded(self):
+        research = {"topic": "x", "synthetic": False,
+                    "timeline": [{"order": i} for i in range(1, 5)],
+                    "sources": [{"id": "a"}, {"id": "b"}],
+                    "narrator": {"name": "Explorer"}}
+        script = {"title": "x", "synthetic": False,
+                  "chapters": [{"narration": "too short"} for _ in range(5)]}
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(studios, "_deep_generate", side_effect=[research, script]):
+                with self.assertRaisesRegex(RuntimeError, "length gate"):
+                    studios.deep_history(Job(job_id="j", studio="deep-history"), small_ctx(d))
 
 
 if __name__ == "__main__":

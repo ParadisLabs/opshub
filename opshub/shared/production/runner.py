@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import studios
 from .contracts import Job, new_job_id
 from .pipeline import StageRunner
+from .storage import upload_artifacts
 
 STUDIO_FUNCS: Dict[str, Callable[..., Dict[str, Any]]] = {
     "trendscope": studios.trendscope,
@@ -92,6 +93,8 @@ def run_studio(studio: str, job: Job, ctx: Dict[str, Any], *,
         result = STUDIO_FUNCS[studio](job, ctx, report)
         if cancel and cancel():
             raise Cancelled("cancelled by operator")
+        # Durable storage is best-effort: a hub/R2 outage never fails a render.
+        result["durable_uploads"] = upload_artifacts(job.job_id, result)
         verdict = str(result.get("verdict") or "")
         status = "blocked" if verdict == "blocked" else "complete"
         runner.state["status"] = status
@@ -124,6 +127,7 @@ def run_all(ctx: Dict[str, Any], *, topic: str = "",
             studios_to_run: Optional[List[str]] = None,
             cancel: Optional[Callable[[], bool]] = None,
             dedupe: bool = True,
+            job_id: Optional[str] = None,
             on_progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Dispatch three independent jobs; failures stay isolated."""
     targets = list(studios_to_run or STUDIOS)
@@ -139,7 +143,10 @@ def run_all(ctx: Dict[str, Any], *, topic: str = "",
         if previous and previous.get("status") in ("complete", "blocked"):
             jobs.append({**previous, "duplicate": True})
             continue
-        job = Job(job_id=new_job_id(name), studio=name, topic=topic,
+        # A dispatched job must keep the hub-issued id so QA and approval land
+        # on the same row; manual runs mint a fresh unique id.
+        chosen_id = job_id if job_id and len(targets) == 1 else new_job_id(name)
+        job = Job(job_id=chosen_id, studio=name, topic=topic,
                   production_mode=ctx.get("production_mode", "test"))
         record = run_studio(name, job, ctx, cancel=cancel, on_progress=on_progress)
         record["duplicate"] = False

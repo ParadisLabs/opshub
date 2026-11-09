@@ -388,13 +388,13 @@ export const handleUpdate = internalAction({
     const text = msg.text.trim();
 
     // Deterministic production commands: no AI interpretation required.
-    const runCommand = text.match(/^\/run\s+(all|icc|flip|english|trendscope|turkce|turkish|truecrime|true-crime|history|deep-history|deep_history)\s*$/i);
+    const runCommand = text.match(/^\/run\s+(all|icc|flip|benji|english|trendscope|turkce|turkish|truecrime|true-crime|history|deep-history|deep_history)\s*$/i);
     if (runCommand) {
       const target = runCommand[1].toLowerCase();
       let result: any;
       if (target === "all") {
         result = await ctx.runAction(internal.engineDispatch.runAll, {});
-      } else if (target === "icc" || target === "flip") {
+      } else if (target === "icc" || target === "flip" || target === "benji") {
         result = await ctx.runAction(internal.engineDispatch.dispatchEngine, {
           engineKey: target,
           reason: "telegram /run " + target,

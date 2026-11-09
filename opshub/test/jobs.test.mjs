@@ -47,6 +47,12 @@ function makeEnv(extra = {}) {
 const sign = (raw, secret = SECRET) =>
   "sha256=" + createHmac("sha256", secret).update(raw).digest("hex");
 
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const signedGet = (path, env) =>
+  app.request(path, {
+    headers: { "x-hub-signature-256": sign(`GET\n${path}\n${EMPTY_SHA256}`) },
+  }, env);
+
 async function signedPost(path, payload, env, opts = {}) {
   const raw = JSON.stringify(payload);
   return app.request(path, {
@@ -128,7 +134,7 @@ describe("job contract: status + transitions", () => {
     assert.equal(body.job.stage, "assets");
     assert.equal(body.job.progress, 55);
 
-    const read = await app.request("/jobs/job-1", {}, env);
+    const read = await signedGet("/jobs/job-1", env);
     assert.equal((await read.json()).job.progress, 55);
   });
 
@@ -150,12 +156,28 @@ describe("job contract: status + transitions", () => {
     await createJob(env); // running
     assert.equal((await signedPost("/jobs/job-1/approve", {}, env)).status, 409);
 
-    await signedPost("/jobs/job-1/status", { status: "awaiting_approval", stage: "approval", progress: 100 }, env);
+    await signedPost("/jobs/job-1/status", {
+      status: "awaiting_approval", stage: "approval", progress: 100,
+      qa: { verdict: "pass", blocking_failures: [], synthetic: false },
+    }, env);
     const res = await signedPost("/jobs/job-1/approve", {}, env);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.status, "approved");
     assert.equal(body.publishing_enabled, false);
+  });
+
+  test("empty QA and synthetic fixtures cannot be approved", async () => {
+    const { env } = makeEnv();
+    await createJob(env);
+    await signedPost("/jobs/job-1/status", { status: "awaiting_approval", stage: "approval" }, env);
+    assert.equal((await signedPost("/jobs/job-1/approve", {}, env)).status, 409);
+
+    await signedPost("/jobs/job-1/status", {
+      status: "awaiting_approval", stage: "approval",
+      qa: { verdict: "pass", blocking_failures: [], synthetic: true },
+    }, env);
+    assert.equal((await signedPost("/jobs/job-1/approve", {}, env)).status, 409);
   });
 
   test("cancel is final", async () => {
@@ -185,7 +207,7 @@ describe("dispatch honesty + readiness", () => {
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.match(body.error, /HUB_GITHUB_TOKEN/);
-    const jobs = await app.request("/jobs", {}, env);
+    const jobs = await signedGet("/jobs", env);
     assert.deepEqual((await jobs.json()).jobs, []);
   });
 
@@ -214,9 +236,9 @@ describe("telegram /run all: independent jobs and failure isolation", () => {
       body: JSON.stringify({ message: { chat: { id: 1 }, text } }),
     }, env).then((r) => r.json());
 
-  test("creates three distinct jobs and isolates one dispatch failure", async () => {
+  test("creates six targets and isolates one dispatch failure", async () => {
     const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
-    await app.request("/jobs", {}, env); // ensureTables
+    await signedGet("/jobs", env); // ensureTables
 
     const original = globalThis.fetch;
     const calls = [];
@@ -237,22 +259,28 @@ describe("telegram /run all: independent jobs and failure isolation", () => {
     assert.match(reply, /trendscope/);
     assert.match(reply, /true-crime/);
     assert.match(reply, /deep-history/);
+    assert.match(reply, /icc/);
+    assert.match(reply, /flip/);
+    assert.match(reply, /benji: unavailable/);
     assert.match(reply, /dispatch (FAILED|error)/);
+    assert.match(reply, /Queued 4\/6/);
     assert.match(reply, /Tracking: \/jobs/);
 
     const rows = sqlite
       .prepare("SELECT job_id, studio, status FROM productions ORDER BY studio")
       .all();
-    assert.equal(rows.length, 3, "three independent jobs must exist");
+    assert.equal(rows.length, 3, "three studio jobs must exist");
     assert.equal(new Set(rows.map((r) => r.job_id)).size, 3, "job ids must be unique");
     assert.deepEqual(rows.map((r) => r.studio), ["deep-history", "trendscope", "true-crime"]);
-    assert.ok(rows.every((r) => r.status === "dispatched"));
-    assert.equal(calls.filter((u) => u.includes("faceless-turkce-studio")).length, 1);
+    assert.deepEqual(rows.map((r) => r.status), ["dispatched", "dispatched", "failed"]);
+    assert.equal(calls.filter((u) => u.includes("faceless-turkce-studio")).length, 3, "transient failures retry exactly three times");
+    assert.ok(calls.some((u) => u.includes("icc-engine")));
+    assert.ok(calls.some((u) => u.includes("business-flip-")));
   });
 
   test("an unknown studio is refused without creating a job", async () => {
     const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
-    await app.request("/jobs", {}, env);
+    await signedGet("/jobs", env);
     const reply = (await telegram("/run nonsense", env)).reply;
     assert.match(reply, /Usage: \/run/);
     const count = sqlite.prepare("SELECT COUNT(*) AS n FROM productions").get().n;
@@ -263,7 +291,7 @@ describe("telegram /run all: independent jobs and failure isolation", () => {
     const { env, sqlite } = makeEnv({
       TELEGRAM_CHAT_ID: "42", HUB_GITHUB_TOKEN: "test-token",
     });
-    await app.request("/jobs", {}, env);
+    await signedGet("/jobs", env);
     const res = await app.request("/_telegram?echo=1", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -276,7 +304,7 @@ describe("telegram /run all: independent jobs and failure isolation", () => {
 
   test("duplicate /run all is deduplicated while jobs are active", async () => {
     const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
-    await app.request("/jobs", {}, env);
+    await signedGet("/jobs", env);
     const original = globalThis.fetch;
     let dispatches = 0;
     globalThis.fetch = async () => {
@@ -293,7 +321,96 @@ describe("telegram /run all: independent jobs and failure isolation", () => {
     assert.match(first, /dispatched/);
     assert.match(second, /deduplicated/);
     const count = sqlite.prepare("SELECT COUNT(*) AS n FROM productions").get().n;
-    assert.equal(count, 3, "a repeated command must not create six jobs");
-    assert.equal(dispatches, 3, "a repeated command must not redispatch");
+    assert.equal(count, 3, "a repeated command must not create studio jobs");
+    assert.equal(dispatches, 5, "five connected targets dispatch once each");
+  });
+
+  test("engine targets dispatch independently and Benji is visibly unavailable", async () => {
+    const { env, sqlite } = makeEnv({ HUB_GITHUB_TOKEN: "test-token" });
+    await signedGet("/jobs", env);
+    const original = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      return { ok: true, status: 204, json: async () => ({}) };
+    };
+    let icc, flip, benji;
+    try {
+      icc = (await telegram("/run icc", env)).reply;
+      flip = (await telegram("/run flip", env)).reply;
+      benji = (await telegram("/run benji", env)).reply;
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.match(icc, /icc: dispatched/);
+    assert.match(flip, /flip: dispatched/);
+    assert.match(benji, /benji: unavailable/);
+    assert.equal(calls.filter((u) => u.includes("icc-engine")).length, 1);
+    assert.equal(calls.filter((u) => u.includes("business-flip-")).length, 1);
+    const engineJobs = sqlite.prepare("SELECT COUNT(*) AS n FROM jobs WHERE kind = 'repository_dispatch'").get().n;
+    assert.equal(engineJobs, 2);
+  });
+
+  test("production refuses the webhook when auth names are missing", async () => {
+    const { env } = makeEnv({ ENVIRONMENT: "production", TELEGRAM_CHAT_ID: "42" });
+    const res = await app.request("/_telegram?echo=1", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: { chat: { id: 42 }, text: "/status" } }),
+    }, env);
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.match(body.error, /not configured/);
+    assert.ok(body.missing.includes("TELEGRAM_BOT_TOKEN"));
+  });
+
+  test("job reads are signed and the public dashboard feed is sanitized", async () => {
+    const { env } = makeEnv();
+    await createJob(env);
+    assert.equal((await app.request("/jobs", {}, env)).status, 401);
+    assert.equal((await signedGet("/jobs", env)).status, 200);
+    const dashboard = await app.request("/dashboard/data", {}, env);
+    assert.equal(dashboard.status, 200);
+    const body = await dashboard.json();
+    assert.equal(body.jobs[0].studio, "trendscope");
+    assert.ok(!("output" in body.jobs[0]));
+    assert.ok(!("detail" in body.jobs[0]));
+  });
+});
+
+describe("retention: dry-run default and approved preservation", () => {
+  test("deletes only expired unapproved objects and never in dry-run", async () => {
+    const files = {
+      deleted: [],
+      objects: [
+        { key: "jobs/approved/old.mp4", uploaded: new Date(Date.now() - 90 * 86400000).toISOString() },
+        { key: "jobs/old/old.mp4", uploaded: new Date(Date.now() - 90 * 86400000).toISOString() },
+        { key: "jobs/new/new.mp4", uploaded: new Date().toISOString() },
+      ],
+      async list() { return { objects: this.objects, truncated: false }; },
+      async delete(key) { this.deleted.push(key); },
+    };
+    const { env, sqlite } = makeEnv({ FILES: files });
+    await signedGet("/jobs", env); // ensureTables
+    sqlite.prepare("INSERT INTO productions (job_id, studio, status, created_at, updated_at) VALUES (?,?,?,?,?)")
+      .run("approved", "trendscope", "approved", 1, 1);
+
+    const dry = await app.request("/retention/run?secret=" + SECRET, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ days: 30, dry_run: true }),
+    }, env);
+    assert.equal(dry.status, 200);
+    const dryBody = await dry.json();
+    assert.equal(dryBody.deleted, 1);
+    assert.equal(dryBody.kept, 2);
+    assert.deepEqual(files.deleted, []);
+
+    const real = await app.request("/retention/run?secret=" + SECRET, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ days: 30, dry_run: false }),
+    }, env);
+    assert.equal(real.status, 200);
+    assert.deepEqual(files.deleted, ["jobs/old/old.mp4"]);
+    assert.equal((await real.json()).approved_preserved, 1);
   });
 });

@@ -1,0 +1,42 @@
+name: Deploy OpsHub Worker
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build/validate only (no upload)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install worker dependencies
+        working-directory: opshub
+        run: npm ci
+      - name: Worker regression tests
+        working-directory: opshub
+        run: node --test test/*.test.mjs
+      - name: Deploy or dry-run
+        working-directory: opshub
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            node scripts/deploy-worker.mjs --dry-run
+          else
+            node scripts/deploy-worker.mjs
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME || 'files' }}
